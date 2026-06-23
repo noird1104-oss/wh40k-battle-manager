@@ -1,13 +1,26 @@
+/**
+ * WH40K Battle Manager — App.jsx
+ *
+ * Firebase構成:
+ *   battleRooms/{roomId}  … バトル状態（players, turn, activePlayer）
+ *   roster/{unitId}       … ユニットロスター（全ユーザー共有の永続保存）
+ *
+ * firebase.js に以下をエクスポートしてください:
+ *   export { db } from "./firebase";
+ */
+
 import { useState, useEffect, useRef, useCallback } from "react";
 import { db } from "./firebase";
-import { doc, setDoc, getDoc, onSnapshot } from "firebase/firestore";
+import {
+  doc, collection, setDoc, getDoc, onSnapshot,
+  addDoc, updateDoc, deleteDoc, query, orderBy
+} from "firebase/firestore";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 const PLAYER_COLORS = ["#C0392B", "#1A6B8A"];
-const STORAGE_KEY   = "wh40k_unit_roster_v2";
-const TOTAL_TURNS   = 5; // turns per player
+const TOTAL_TURNS   = 5;
 
 const FACTIONS = [
   "アエルダリ","アストラ・ミリタルム","アデプタ・ソロリタス","アデプトゥス・カストーデス",
@@ -24,121 +37,100 @@ const WPN_FIELDS  = [
   {key:"range",label:"射程"},{key:"A",label:"回"},{key:"skill",label:"接"},
   {key:"BS",label:"射"},{key:"S",label:"攻"},{key:"AP",label:"貫"},{key:"D",label:"ダ"},
 ];
-
-// Phase accent colors (one per phase tab)
 const PHASE_COLORS = {
-  turnStart: "#6A5ACD",  // slate purple
-  command:   "#D4AF37",  // gold
-  movement:  "#2E8B57",  // sea green
-  shooting:  "#C0392B",  // red
-  charge:    "#E67E22",  // orange
-  fight:     "#8B1A1A",  // dark crimson
-  turnEnd:   "#4A4A6A",  // muted purple
+  turnStart:"#6A5ACD", command:"#D4AF37", movement:"#2E8B57",
+  shooting:"#C0392B",  charge:"#E67E22",  fight:"#8B1A1A", turnEnd:"#4A4A6A",
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TOOLTIP DEFINITIONS
 // ─────────────────────────────────────────────────────────────────────────────
 const TOOLTIPS = {
-  halfStrength: { title:"半壊状態", body:[
+  halfStrength:{ title:"半壊状態", body:[
     "ユニットの初期兵数が<em>1体</em>である場合、その兵の【負傷限界】の残量が最大値の<em>半分未満</em>であるならば、そのユニットは半壊状態とみなされる。",
     "それ以外のユニットは、ユニット内の兵数がそのユニットの初期兵数の<em>半分未満</em>であるならば、そのユニットは半壊状態とみなされる。",
   ]},
-  battleShock: { title:"戦闘ショックロール", body:[
+  battleShock:{ title:"戦闘ショックロール", body:[
     "<em>2D6</em>をロールし、ロール結果がそのユニットの【指揮統制値】以上であれば成功。失敗した場合、次の自軍側指揮フェイズ開始時まで、そのユニットは戦闘ショック状態となる。",
     "戦闘ショック状態のユニット内のすべての兵の【確保力】は「<em>-</em>」となる。",
     "戦闘ショック状態のユニットの操作プレイヤーは、そのユニットを策略の対象に選択できない。",
     "戦闘ショック状態のユニットはアクションの開始を行えず、既に開始しているアクションは完了できない。",
   ]},
-  stationary: { title:"静止", body:[
+  stationary:{ title:"静止", body:[
     "ユニットが静止する場合、以降そのフェイズの終了時まで、そのユニット内のいかなる兵も移動を行なえない。",
   ]},
-  normalMove: { title:"通常移動", body:[
+  normalMove:{ title:"通常移動", body:[
     "最大距離：そのユニットの【<em>移動力</em>】の能力値。",
     "条件：戦場におり、<em>非接敵状態</em>の自軍のユニット。",
     "移動後：そのユニットは非接敵状態でなければならない。",
   ]},
-  advanceMove: { title:"全力移動", body:[
+  advanceMove:{ title:"全力移動", body:[
     "最大距離：全力移動ロール（<em>D6</em>）結果と、そのユニットの【<em>移動力</em>】の能力値の合計値。",
     "条件：戦場におり、<em>非接敵状態</em>の自軍のユニット。",
     "移動後：そのユニットは非接敵状態でなければならない。",
     "▪ そのターン終了時まで、他に記述が無い限り、その自軍のユニットは突撃を宣言したり、アクションを開始できない。",
   ]},
-  fallBack: { title:"退却移動", body:[
-    "最大距離：そのユニットの【<em>移動力</em>】の能力値。",
-    "条件：<em>接敵状態</em>の自軍のユニット。",
-    "移動前：退却モードを選択する。",
-    "▪ 戦術的後退：そのユニットが戦闘ショック状態でない場合に選択可能。",
-    "▪ 決死の脱出：それ以外の場合は必須。ユニット内の各兵に対して<em>D6</em>を1個ロール。結果が<em>1 or 2</em>なら兵1体が<em>1pt（モンスター/ビークルは3pt）</em>の致命的ダメージ。",
-    "移動後：そのユニットは非接敵状態でなければならない。そのターン終了時まで射撃・突撃・アクションを開始できない。",
-    "▪ 決死の脱出かつ戦闘ショック状態でない場合：戦闘ショックロールを行わなければならない。",
+  fallBack:{ title:"退却移動", body:[
+    "最大距離：そのユニットの【<em>移動力</em>】の能力値。条件：<em>接敵状態</em>の自軍のユニット。",
+    "▪ 戦術的後退：戦闘ショック状態でない場合に選択可能。",
+    "▪ 決死の脱出：それ以外の場合は必須。各兵に<em>D6</em>をロール。結果が<em>1 or 2</em>なら兵1体が<em>1pt（モンスター/ビークルは3pt）</em>の致命的ダメージ。",
+    "移動後：非接敵状態。そのターン終了時まで射撃・突撃・アクション開始不可。",
   ]},
-  embark: { title:"降車移動", body:[
+  embark:{ title:"降車移動", body:[
     "配置距離：高速 / 戦術的降車 <em>3mv</em> ／ 戦闘降車 <em>6mv</em>。",
-    "条件：戦場に存在する兵員輸送に乗車しており、その兵員輸送が現在フェイズ中に全力移動・退却移動を実行していない。",
-    "▪ 高速降車：兵員輸送が通常移動や突入移動済みの場合。降車後、突撃を宣言できない。",
-    "▪ 戦術的降車：兵員輸送が静止中や未移動の場合。降車後、通常移動か全力移動を実行できる。",
+    "▪ 高速降車：通常移動や突入移動済みの場合。降車後、突撃不可。",
+    "▪ 戦術的降車：静止中や未移動の場合。降車後、通常移動か全力移動を実行できる。",
     "▪ 戦闘降車：その他の場合。各兵に<em>D6</em>をロール。結果が<em>1 or 2</em>なら兵1体が<em>1pt（モンスター/ビークルは3pt）</em>の致命的ダメージ。降車後、戦闘ショック状態かつ突撃不可。",
   ]},
-  deepStrike: { title:"突入移動", body:[
-    "配置距離：<em>6mv</em>。",
-    "条件：戦略的予備戦力内にいる自軍のユニット。",
-    "移動中：戦場端の少なくとも一辺から配置距離内に全体が入り、あらゆる敵ユニットから水平方向に<em>8mv</em>より遠く離れるよう配置。",
+  deepStrike:{ title:"突入移動", body:[
+    "配置距離：<em>6mv</em>。条件：戦略的予備戦力内にいる自軍のユニット。",
+    "移動中：戦場端の少なくとも一辺から配置距離内に全体が入り、敵ユニットから水平方向に<em>8mv</em>より遠く離れるよう配置。",
     "▪ 第<em>3</em>バトルラウンド以前：敵軍初期配置ゾーン内に配置不可。",
     "移動後：次の自軍突撃フェイズ開始時まで、他タイプの移動を宣言できない。",
   ]},
-  engaged: { title:"非接敵状態", body:[
-    "兵の接敵範囲：その兵から水平方向<em>2mv</em>かつ垂直方向<em>5mv</em>の戦場エリア。",
-    "▪ 味方の兵が<em>1体以上</em>の敵兵の接敵範囲内にいる間、それらの兵と、その兵のユニットは互いに接敵状態になる。",
+  engaged:{ title:"非接敵状態", body:[
+    "兵の接敵範囲：水平方向<em>2mv</em>かつ垂直方向<em>5mv</em>の戦場エリア。",
+    "▪ 味方の兵が<em>1体以上</em>の敵兵の接敵範囲内にいる間、それらの兵とユニットは互いに接敵状態になる。",
     "▪ ユニット内に接敵状態である兵が<em>1体もいない</em>間、そのユニットは非接敵状態になる。",
   ]},
-  NormalShooting: { title:"通常射撃", body:[
+  NormalShooting:{ title:"通常射撃", body:[
     "条件：非接敵状態であり、このターン中に全力移動を行っていない自軍のユニット。",
     "射撃後：そのフェイズ終了時まで、その自軍のユニットはアクションの開始を宣言できない。",
   ]},
-  AssaultShooting: { title:"アサルト射撃", body:[
+  AssaultShooting:{ title:"アサルト射撃", body:[
     "条件：非接敵状態であり、このターン中に全力移動を行っており、【<em>アサルト</em>】武器を持つ自軍ユニット。",
     "射撃後：そのフェイズ終了時まで、その自軍のユニットはアクションの開始を宣言できない。",
   ]},
-  CloseQuartersShooting: { title:"至近射撃", body:[
+  CloseQuartersShooting:{ title:"至近射撃", body:[
     "条件：接敵状態であり、このターン中に全力移動を行っておらず、【<em>至近</em>】武器を持つかモンスター/ビークルである自軍ユニット。",
     "▪ 通常ユニットは【<em>至近</em>】武器のみ使用可能で、接敵中の敵のみを攻撃可能。",
-    "▪ モンスター/ビークルは射撃可能だが、接敵中の敵への【<em>至近</em>】武器以外の攻撃はヒットロールに<em>-1</em>の修正を受ける。",
-    "▪ 【<em>ブラスト</em>】武器は接敵中の敵を攻撃できない。",
+    "▪ モンスター/ビークルは射撃可能だが、接敵中の敵への【<em>至近</em>】武器以外の攻撃はヒットロールに<em>-1</em>の修正。",
     "射撃後：そのフェイズ終了時まで、その自軍のユニットはアクションの開始を宣言できない。",
   ]},
-  IndirectShooting: { title:"間接射撃", body:[
+  IndirectShooting:{ title:"間接射撃", body:[
     "条件：非接敵状態で、このターン中に全力移動を行っておらず、【<em>間接</em>】武器を持つ自軍ユニット。",
-    "▪ 視認できない敵ユニットを攻撃可能。",
-    "▪ 攻撃対象は遮蔽物ボーナスを得る。",
-    "▪ ヒットロールのリロール不可。",
+    "▪ 視認できない敵ユニットを攻撃可能。▪ 攻撃対象は遮蔽物ボーナスを得る。▪ ヒットロールのリロール不可。",
     "▪ 修正前出目<em>1-5</em>は失敗。ただし静止状態、または味方が攻撃対象を視認している場合は<em>1-3</em>のみ失敗。",
-    "射撃後：そのフェイズ終了時まで、その自軍のユニットはアクションの開始を宣言できない。",
   ]},
-  NormalFight: { title:"通常白兵", body:[
+  NormalFight:{ title:"通常白兵", body:[
     "条件：接敵状態の自軍ユニット。",
     "白兵中：その武器を持つ兵と接敵状態の敵ユニットを、武器の【<em>回数</em>】の能力値まで対象に選択できる。",
   ]},
-  OverrunFight: { title:"制圧白兵", body:[
+  OverrunFight:{ title:"制圧白兵", body:[
     "条件：非接敵状態である、またはこの白兵フェイズ中に非接敵状態から接敵状態になった自軍ユニット。",
     "▪ その自軍のユニットは追加で<em>1回</em>の接敵移動を行える。",
-    "▪ その武器を持つ兵と接敵状態の敵ユニットを、武器の【<em>回数</em>】の能力値まで対象に選択できる。",
   ]},
-  OngoingConsolidation: { title:"戦闘再編移動", body:[
+  OngoingConsolidation:{ title:"戦闘再編移動", body:[
     "条件：接敵状態であり、このフェイズ中に白兵を宣言可能であった自軍ユニット。",
-    "▪ 敵兵とベース接触している兵は移動できない。",
-    "▪ 接敵中の敵ユニットへ近づくように移動する。",
+    "▪ 敵兵とベース接触している兵は移動できない。▪ 接敵中の敵ユニットへ近づくように移動する。",
     "移動後：移動開始時に接敵していた敵ユニットとの接敵状態を維持しなければならない。",
   ]},
-  EngagingConsolidation: { title:"接敵再編移動", body:[
+  EngagingConsolidation:{ title:"接敵再編移動", body:[
     "条件：非接敵状態であり、このフェイズ中に白兵を宣言可能であった自軍ユニットかつ、<em>3mv</em>以内に敵ユニットが存在する。",
-    "移動中：選択した敵ユニットへ近づくように移動する。",
-    "▪ 選択したすべての敵ユニットと接敵状態でなければならない。",
-    "▪ この移動によって接敵した敵ユニットがまだ白兵を宣言していない場合、その敵ユニットは白兵を宣言する。",
+    "移動中：選択した敵ユニットへ近づくように移動する。選択したすべての敵ユニットと接敵状態でなければならない。",
   ]},
-  ObjectiveConsolidation: { title:"目標再編移動", body:[
+  ObjectiveConsolidation:{ title:"目標再編移動", body:[
     "条件：接敵状態ではなく、このフェイズ中に白兵を宣言可能であった自軍ユニットかつ、<em>3mv</em>以内に作戦目標が存在する。",
-    "移動中：選択した作戦目標へ近づくように移動する。",
     "移動後：選択した作戦目標の確保範囲内にいなければならない。",
   ]},
 };
@@ -163,10 +155,10 @@ const PHASES = [
       { text:"アクティブプレイヤーは、以下の条件を<em>1つ以上</em>満たしている自軍の各ユニットに、<strong class='tl' data-tip='battleShock'>戦闘ショックロール</strong>を<em>1回</em>ずつ行う。" },
       { text:"▪ そのユニットが現在<em>戦闘ショック状態</em>である。" },
       { text:"▪ そのユニットが<strong class='tl' data-tip='halfStrength'>半壊状態</strong>である。" },
-      { text:"このステップの開始時にユニットが戦闘ショック状態であり、このステップ中に<strong class='tl' data-tip='battleShock'>戦闘ショックロール</strong>に成功した場合、そのユニットは戦闘ショック状態ではなくなる。" },
+      { text:"このステップの開始時にユニットが戦闘ショック状態であり、<strong class='tl' data-tip='battleShock'>戦闘ショックロール</strong>に成功した場合、そのユニットは戦闘ショック状態ではなくなる。" },
     ]},
     { id:"cmd4", name:"４. 指揮アビリティ", tooltips:["battleShock"], bullets:[
-      { text:"指揮フェイズに誘発するルール（このフェイズの開始時や終了時、指揮ポイント（CP）獲得時、または<strong class='tl' data-tip='battleShock'>戦闘ショックロール</strong>時に誘発するルールを除く）を解決する。" },
+      { text:"指揮フェイズに誘発するルール（このフェイズの開始時や終了時、CP獲得時、または<strong class='tl' data-tip='battleShock'>戦闘ショックロール</strong>時に誘発するルールを除く）を解決する。" },
     ]},
     { id:"cmd5", name:"５. 指揮フェイズ終了時", bullets:[
       { text:"以下の順番に従って、指揮フェイズ終了時に誘発するルールを解決する。" },
@@ -180,32 +172,24 @@ const PHASES = [
     ]},
     { id:"mov2", name:"２. ユニットの移動", tooltips:["stationary","normalMove","advanceMove","fallBack","embark","deepStrike","engaged"], bullets:[
       { text:"アクティブプレイヤーは以下の手順を使用して、自軍のユニットを<em>1個ずつ</em>移動させる。すべての自軍のユニットの移動が完了するまで繰り返す。" },
-      { text:"<em>1.</em> ユニットの選択：このフェイズ中にまだ移動を宣言していない味方ユニットを<em>1個</em>選択する（戦場・戦略的予備兵力・兵員輸送乗車中を含む）。" },
-      { text:"<em>2.</em> 移動タイプの選択：以下のうち<em>1つ</em>を選択し解決する。" },
-      { text:"　▪ <strong class='tl' data-tip='stationary'>静止</strong>　▪ <strong class='tl' data-tip='normalMove'>通常移動</strong>　▪ <strong class='tl' data-tip='advanceMove'>全力移動</strong>　▪ <strong class='tl' data-tip='fallBack'>退却移動</strong>　▪ <strong class='tl' data-tip='embark'>降車移動</strong>　▪ <strong class='tl' data-tip='deepStrike'>突入移動</strong>" },
+      { text:"<em>1.</em> ユニットの選択：このフェイズ中にまだ移動を宣言していない味方ユニットを<em>1個</em>選択する。" },
+      { text:"<em>2.</em> 移動タイプの選択：　▪ <strong class='tl' data-tip='stationary'>静止</strong>　▪ <strong class='tl' data-tip='normalMove'>通常移動</strong>　▪ <strong class='tl' data-tip='advanceMove'>全力移動</strong>　▪ <strong class='tl' data-tip='fallBack'>退却移動</strong>　▪ <strong class='tl' data-tip='embark'>降車移動</strong>　▪ <strong class='tl' data-tip='deepStrike'>突入移動</strong>" },
     ]},
     { id:"mov3", name:"３. 移動フェイズ終了時", bullets:[
       { text:"移動フェイズ終了時に誘発するルールを解決する。" },
     ]},
   ]},
   { id:"shooting", name:"射撃フェイズ", steps:[
-    { id:"sho1", name:"１. 射撃フェイズ開始時", bullets:[
-      { text:"射撃フェイズ開始時に誘発するルールを解決する。" },
-    ]},
+    { id:"sho1", name:"１. 射撃フェイズ開始時", bullets:[{ text:"射撃フェイズ開始時に誘発するルールを解決する。" }]},
     { id:"sho2", name:"２. 射撃", tooltips:["NormalShooting","AssaultShooting","CloseQuartersShooting","IndirectShooting"], bullets:[
       { text:"アクティブプレイヤーは以下の手順を使用して、<em>1ユニット</em>ずつ射撃を行わせる。" },
       { text:"<em>1.</em> ユニットの選択：射撃を宣言可能な味方ユニットを<em>1個</em>選択する。" },
-      { text:"<em>2.</em> 射撃タイプの選択：以下のうち<em>1つ</em>を選択し解決する。" },
-      { text:"　▪ <strong class='tl' data-tip='NormalShooting'>通常射撃</strong>　▪ <strong class='tl' data-tip='AssaultShooting'>アサルト射撃</strong>　▪ <strong class='tl' data-tip='CloseQuartersShooting'>至近射撃</strong>　▪ <strong class='tl' data-tip='IndirectShooting'>間接射撃</strong>" },
+      { text:"<em>2.</em> 射撃タイプ：　▪ <strong class='tl' data-tip='NormalShooting'>通常射撃</strong>　▪ <strong class='tl' data-tip='AssaultShooting'>アサルト射撃</strong>　▪ <strong class='tl' data-tip='CloseQuartersShooting'>至近射撃</strong>　▪ <strong class='tl' data-tip='IndirectShooting'>間接射撃</strong>" },
     ]},
-    { id:"sho3", name:"３. 射撃フェイズ終了時", bullets:[
-      { text:"射撃フェイズ終了時に誘発するルールを解決する。" },
-    ]},
+    { id:"sho3", name:"３. 射撃フェイズ終了時", bullets:[{ text:"射撃フェイズ終了時に誘発するルールを解決する。" }]},
   ]},
   { id:"charge", name:"突撃フェイズ", steps:[
-    { id:"cha1", name:"１. 突撃フェイズ開始時", bullets:[
-      { text:"突撃フェイズ開始時に誘発するルールを解決する。" },
-    ]},
+    { id:"cha1", name:"１. 突撃フェイズ開始時", bullets:[{ text:"突撃フェイズ開始時に誘発するルールを解決する。" }]},
     { id:"cha2", name:"２. 突撃", bullets:[
       { text:"アクティブプレイヤーは以下の手順を使用して、<em>1ユニット</em>ずつ突撃を行わせる。" },
       { text:"<em>1.</em> ユニットの選択：突撃を宣言可能な味方ユニットを<em>1個</em>選択する。" },
@@ -213,34 +197,28 @@ const PHASES = [
       { text:"<em>2.</em> 突撃ロール：<em>2D6</em>をロールし、突撃移動の最大距離を決定する。" },
       { text:"<em>3.</em> 突撃移動：突撃移動が可能であれば実行する。" },
     ]},
-    { id:"cha3", name:"３. 突撃フェイズ終了時", bullets:[
-      { text:"突撃フェイズ終了時に誘発するルールを解決する。" },
-    ]},
+    { id:"cha3", name:"３. 突撃フェイズ終了時", bullets:[{ text:"突撃フェイズ終了時に誘発するルールを解決する。" }]},
   ]},
   { id:"fight", name:"白兵戦フェイズ", steps:[
-    { id:"fig1", name:"１. 白兵フェイズ開始時", bullets:[
-      { text:"白兵フェイズ開始時に誘発するルールを解決する。" },
-    ]},
+    { id:"fig1", name:"１. 白兵フェイズ開始時", bullets:[{ text:"白兵フェイズ開始時に誘発するルールを解決する。" }]},
     { id:"fig2", name:"２. 接敵移動", bullets:[
       { text:"白兵フェイズ中、接敵移動可能なユニットは最大<em>3mv</em>の接敵移動を行える。" },
       { text:"<em>1.</em> ユニットの選択：接敵状態、このターン中に突撃移動を行った、またはこのフェイズ中に制圧白兵を選択した自軍ユニットを選択する。" },
-      { text:"<em>2.</em> 接敵移動対象の選択：接敵状態なら接敵中の敵ユニットすべて。非接敵状態なら<em>5mv</em>以内の敵ユニット<em>1個</em>以上。" },
-      { text:"<em>3.</em> 接敵移動：最も近い接敵移動対象へ近づくように移動する。※敵兵とベース接触中の兵は移動不可。" },
+      { text:"<em>2.</em> 接敵移動対象：接敵状態なら接敵中の敵ユニットすべて。非接敵状態なら<em>5mv</em>以内の敵ユニット<em>1個</em>以上。" },
+      { text:"<em>3.</em> 接敵移動：最も近い対象へ近づくように移動する。※敵兵とベース接触中の兵は移動不可。" },
       { text:"<em>4.</em> 移動終了：ユニットは接敵状態でなければならず、既に接敵していた敵との接敵は維持する。" },
     ]},
     { id:"fig3", name:"３. 白兵", tooltips:["NormalFight","OverrunFight"], bullets:[
       { text:"プレイヤーは交互に、白兵を宣言可能なユニットを<em>1個</em>ずつ選択して白兵を解決する。" },
       { text:"※【<em>先手</em>】を持つユニットを優先して解決する。" },
       { text:"<em>1.</em> ユニットの選択：接敵状態（このステップ開始時に接敵であった場合を含む）またはこのターン中に突撃移動を行ったユニット。" },
-      { text:"<em>2.</em> 白兵タイプの選択：　▪ <strong class='tl' data-tip='NormalFight'>通常白兵</strong>　▪ <strong class='tl' data-tip='OverrunFight'>制圧白兵</strong>" },
+      { text:"<em>2.</em> 白兵タイプ：　▪ <strong class='tl' data-tip='NormalFight'>通常白兵</strong>　▪ <strong class='tl' data-tip='OverrunFight'>制圧白兵</strong>" },
     ]},
     { id:"fig4", name:"４. 再編移動", tooltips:["OngoingConsolidation","EngagingConsolidation","ObjectiveConsolidation"], bullets:[
       { text:"アクティブプレイヤーは、白兵フェイズ中に白兵を宣言可能であったユニットに<em>最大3mv</em>の再編移動を行わせる。" },
       { text:"　▪ <strong class='tl' data-tip='OngoingConsolidation'>戦闘再編移動</strong>　▪ <strong class='tl' data-tip='EngagingConsolidation'>接敵再編移動</strong>　▪ <strong class='tl' data-tip='ObjectiveConsolidation'>目標再編移動</strong>" },
     ]},
-    { id:"fig5", name:"５. 白兵フェイズ終了時", bullets:[
-      { text:"白兵フェイズ終了時に誘発するルールを解決する。" },
-    ]},
+    { id:"fig5", name:"５. 白兵フェイズ終了時", bullets:[{ text:"白兵フェイズ終了時に誘発するルールを解決する。" }]},
   ]},
   { id:"turnEnd", name:"ターン終了時", steps:[
     { id:"te1", name:"ターン終了時ステップ", bullets:[
@@ -252,20 +230,20 @@ const PHASES = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BASIC STRATAGEMS
+// STRATAGEMS
 // ─────────────────────────────────────────────────────────────────────────────
 const STRATAGEMS = [
   { id:"s1", name:"リロール命令", cp:"1CP", body:[
     "<em>タイミング</em>：どのフェイズでも。味方ユニットや兵が、以下のロールのいずれか<em>1つ</em>を行った直後：",
     "　▪ 全力移動ロール　▪ 突撃ロール　▪ ダメージ量判定ロール　▪ 危機ロール",
-    "　▪ ヒットロール　▪ セーブロール　▪ ウーンズロール　▪ いずれかの武器で行う攻撃回数を決めるためのロール",
+    "　▪ ヒットロール　▪ セーブロール　▪ ウーンズロール　▪ 攻撃回数を決めるためのロール",
     "<em>対象</em>：そのユニットまたは兵。",
-    "<em>効果</em>：そのロールをリロールする。<em>2個以上</em>のダイスを同時にロールしている場合、それらのダイスのうち<em>1個</em>を選んでリロールする（ただし突撃ロールの場合は、<em>すべて</em>のダイスをリロールすること）。",
+    "<em>効果</em>：そのロールをリロールする。<em>2個以上</em>のダイスを同時にロールしている場合、<em>1個</em>を選んでリロールする（突撃ロールの場合は<em>すべて</em>をリロールすること）。",
   ]},
   { id:"s2", name:"英雄的挑戦", cp:"1CP", body:[
     "<em>タイミング</em>：白兵フェイズ中、味方キャラクター・ユニットが白兵を宣言した直後。",
     "<em>対象</em>：そのキャラクター・ユニット。",
-    "<em>効果</em>：その自軍のユニット内のキャラクターの兵<em>1体</em>を選択する。そのフェイズの終了時まで、その兵が装備している白兵武器は［<em>精密攻撃</em>］アビリティを持つ。",
+    "<em>効果</em>：そのユニット内のキャラクターの兵<em>1体</em>を選択する。そのフェイズの終了時まで、その兵が装備している白兵武器は［<em>精密攻撃</em>］アビリティを持つ。",
   ]},
   { id:"s3", name:"狂気の奮戦", cp:"1CP", body:[
     "<em>タイミング</em>：自軍の指揮フェイズの戦闘ショックステップ中、味方ユニットが戦闘ショックロールを行う直前。",
@@ -276,31 +254,26 @@ const STRATAGEMS = [
   { id:"s4", name:"爆発物使用", cp:"1CP", body:[
     "<em>タイミング</em>：自軍側射撃フェイズ中。",
     "<em>対象</em>：このターン中に全力移動を行っておらず射撃を宣言可能な、非接敵状態の味方爆発物/グレネード・ユニット<em>1個</em>。",
-    "<em>効果</em>：",
-    "　<em>1.</em> そのユニット内の爆発物 / グレネードの兵を<em>1体</em>選択する。",
-    "　<em>2.</em> 選択した兵の<em>8mv</em>以内に一部でも入っており、視認可能で、非接敵状態の敵ユニットを<em>1個</em>選択する。",
-    "　<em>3.</em> <em>D6を6個</em>ロールする。ロール結果で<em>4+</em>が出るたび、選択された敵ユニットは<em>1ポイント</em>の致命的ダメージを受ける。",
+    "<em>効果</em>：　<em>1.</em> そのユニット内の爆発物/グレネードの兵を<em>1体</em>選択する。",
+    "　<em>2.</em> 選択した兵の<em>8mv</em>以内、視認可能で、非接敵状態の敵ユニットを<em>1個</em>選択する。",
+    "　<em>3.</em> <em>D6を6個</em>ロールする。<em>4+</em>が出るたび、選択された敵ユニットは<em>1ポイント</em>の致命的ダメージを受ける。",
   ]},
   { id:"s5", name:"激突", cp:"1CP", body:[
     "<em>タイミング</em>：自軍の突撃フェイズ中、味方モンスター/ビークル・ユニットが突撃移動を終了した直後。",
-    "<em>対象</em>：そのモンスター / ビークル・ユニット。",
-    "<em>効果</em>：",
-    "　<em>1.</em> そのユニットと接敵状態である敵ユニットを<em>1個</em>選択する。",
+    "<em>効果</em>：　<em>1.</em> そのユニットと接敵状態である敵ユニットを<em>1個</em>選択する。",
     "　<em>2.</em> 選択した敵ユニットと接敵状態である、その味方ユニット内の兵を<em>1体</em>選択する。",
-    "　<em>3.</em> その味方の兵の【耐久力】と同じ数の<em>D6</em>をロールする：ロール結果が<em>1</em>の場合は自軍ユニットが<em>1pt</em>の、<em>5+</em>の場合は選択した敵ユニットが<em>1pt</em>の致命的ダメージを受ける（最大<em>6pt</em>まで）。",
+    "　<em>3.</em> その味方の兵の【耐久力】と同じ数の<em>D6</em>をロールする：<em>1</em>の場合は自軍ユニットが<em>1pt</em>、<em>5+</em>の場合は選択した敵ユニットが<em>1pt</em>の致命的ダメージ（最大<em>6pt</em>）。",
   ]},
   { id:"s6", name:"即応投入", cp:"1CP", body:[
     "<em>タイミング</em>：敵軍側移動フェイズ終了時。",
     "<em>対象</em>：戦略的予備兵力に配置されている味方ユニット<em>1個</em>（航空機を除く）。",
     "<em>効果</em>：その自軍のユニットは突入移動を行う。",
-    "<em>制限</em>：第<em>1</em>バトルラウンド中は、この策略を使用できない。",
+    "<em>制限</em>：第<em>1</em>バトルラウンド中は使用できない。",
   ]},
   { id:"s7", name:"警戒射撃", cp:"1CP", body:[
     "<em>効果</em>：その自軍のユニットは即応射撃で射撃を行う。",
-    "【即応射撃】",
-    "　▪ その自軍のユニットの<em>24mv</em>以内に一部でも入っており、視認可能な敵ユニット<em>1個</em>のみを対象として選択できる。",
-    "　▪ それらの攻撃は、武器の【射】や他の修正値にかかわらず、常にヒットロールで修正前の出目<em>6</em>が出た場合のみヒットする。",
-    "　▪ 自軍はそのヒットロールをリロールできない。",
+    "　▪ <em>24mv</em>以内、視認可能な敵ユニット<em>1個</em>のみを対象に選択できる。",
+    "　▪ 常にヒットロールで修正前の出目<em>6</em>が出た場合のみヒットする。▪ ヒットロールをリロールできない。",
     "射撃後：そのフェイズ終了時まで、その自軍のユニットはアクションの開始を宣言できない。",
   ]},
   { id:"s8", name:"煙幕", cp:"1CP", body:[
@@ -310,8 +283,8 @@ const STRATAGEMS = [
   ]},
   { id:"s9", name:"英雄的介入", cp:"1CP", body:[
     "<em>タイミング</em>：敵軍側突撃フェイズ開始時。",
-    "<em>対象</em>：<em>1個以上</em>の敵ユニットの<em>12mv</em>以内に一部でも入っている、味方の非接敵状態のユニット<em>1個</em>。ビークル・ユニットを選択する場合は、キャラクター / ウォーカー・ユニットの場合のみ選択可能。",
-    "<em>効果</em>：その自軍のユニットは突撃を解決する。以下のモードから<em>1つ</em>を選択する：",
+    "<em>対象</em>：<em>1個以上</em>の敵ユニットの<em>12mv</em>以内に一部でも入っている、味方の非接敵状態のユニット<em>1個</em>。",
+    "<em>効果</em>：その自軍のユニットは突撃を解決する。以下のモードから<em>1つ</em>を選択：",
     "　▪ <em>前進防衛</em>：このフェイズ中に突撃移動を行っており、最大距離の範囲内にいる敵ユニットのみを選択できる。",
     "　▪ <em>攻勢突進（+1CP）</em>：突撃ロール結果が<em>6</em>を上回っている場合、ロール結果を<em>6</em>にする。その自軍のユニットの<em>6mv</em>以内にいる敵ユニットを選択できる。",
   ]},
@@ -326,136 +299,39 @@ const STRATAGEMS = [
 // CORE ABILITIES
 // ─────────────────────────────────────────────────────────────────────────────
 const CORE_ABILITIES = [
-  { id:"ca1", name:"［特効］", body:[
-    "このアビリティは常に<em>［X 特効 Y+］</em>という形式で表記される。［特効］武器による攻撃時、攻撃対象が X 部分のキーワードを持つならば、ウーンズロールで修正前の出目<em>Y+</em>が出た場合、<em>クリティカルウーンズ</em>となる。",
-    "例：［ビークル特効 <em>4+</em>］武器でビークルユニットを攻撃し、ウーンズロールの修正前の出目<em>4+</em>によってクリティカルウーンズが発生する。",
-  ]},
-  { id:"ca2", name:"［アサルト］", body:[
-    "［アサルト］武器を持つ兵が<em>1個でも</em>含まれているユニットは、アサルト射撃を使用して射撃できる。",
-  ]},
-  { id:"ca3", name:"［ブラスト］", body:[
-    "［ブラスト］武器のために攻撃ダイスを集める際、攻撃対象選択ステップにおいて選択されたユニット内の兵<em>5体ごと</em>（端数切り下げ）に、追加で<em>1個</em>の攻撃ダイスを得る。",
-    "このアビリティが<em>［ブラストX］</em>のような表記である場合、兵<em>5体ごと</em>に追加で<em>X個</em>の攻撃ダイスを得る。",
-    "例：［ブラスト 2］【攻撃回数】<em>3</em> の武器で、兵<em>12</em>体のユニットを攻撃する。追加攻撃ダイスは<em>4個</em>（合計<em>7個</em>）になる。",
-  ]},
-  { id:"ca4", name:"［蹂躙］", body:[
-    "このアビリティは常に<em>［蹂躙 X］</em>という形式で表記される。その武器のすべての攻撃で単一の対象を選択していたならば、選択されたユニット内の兵<em>5体ごと</em>（端数切り下げ）に、追加で<em>X個</em>の攻撃ダイスを得る。",
-    "例：［蹂躙 1］【攻撃回数】<em>3</em>の武器で、兵<em>16</em>体のユニットを攻撃する。追加攻撃ダイスは<em>3個</em>（合計<em>6個</em>）になる。",
-  ]},
-  { id:"ca5", name:"［至近］", body:[
-    "［至近］武器を持つ兵が<em>1個でも</em>含まれているユニットは、至近射撃を使用して射撃できる。",
-    "それ以外の射撃タイプを使用している時、そのユニット内の各兵（モンスター/ビークル兵を除く）は、以下のうち<em>1つ</em>だけを選択して攻撃できる：",
-    "　▪ その兵が持つ<em>1個以上</em>の［至近］武器。",
-    "　▪ その兵が持つ<em>1個以上</em>の他の射撃武器。",
-  ]},
-  { id:"ca6", name:"恐るべき最期", body:[
-    "このアビリティは常に<em>恐るべき最期 X</em>という形式で表記される。このユニット内の兵が撃破されるたび、その中に乗車しているユニット（いるなら）が緊急降車移動をした後で、<em>D6</em>を1個ロールする。ロール結果が<em>6</em>であれば、撃破された兵は恐るべき最期を迎えることになる。その兵の<em>6mv</em>以内に一部でも入っているユニットは<em>Xポイント</em>の致命的ダメージを受ける。",
-  ]},
-  { id:"ca7", name:"縦深攻撃", body:[
-    "このユニットが突入移動をする際、ユニット内の全兵がこのアビリティを持っているならば、このユニットをあらゆる敵ユニットから水平方向に<em>8mv</em>より遠く離れるように、戦場の<em>任意の地点</em>に配置してもよい（敵軍初期配置ゾーン内も可能）。",
-  ]},
-  { id:"ca8", name:"［会心ウーンズ］", body:[
-    "［会心ウーンズ］武器による攻撃の結果としてクリティカルウーンズが発生したならば、その攻撃手順はそこで終了し、攻撃対象ユニットはその武器の【ダメージ量】に等しいポイント数の<em>致命的ダメージ</em>を受ける。",
-    "致命的ダメージを与えることができるのは、<em>1回のクリティカルウーンズごとに最大で兵1体</em>に対してのみ。残りの致命的ダメージは失われる。",
-    "例：【攻撃回数】<em>3</em>の武器でクリティカルウーンズが発生し、<em>3ポイント</em>の致命的ダメージを与えることになった。最初の<em>2ポイント</em>でインターセッサー兵1体を撃破するには充分なため、残りの致命的ダメージは失われる。",
-  ]},
-  { id:"ca9", name:"［追加攻撃］", body:[
-    "［追加攻撃］武器を持つ兵が<em>1体でも</em>含まれているユニットが白兵戦をする際、それらの兵はその他の武器に加えて該当の武器による攻撃もする。",
-    "武器選択ステップにおいて、それらの各兵のために以下から選択する：",
-    "　▪ その兵が持つ<em>すべての</em>［追加攻撃］武器。",
-    "　▪ その兵が持つ他の白兵戦武器<em>1個</em>（可能であれば）。",
-  ]},
-  { id:"ca10", name:"痛みを知らぬ者", body:[
-    "このアビリティは常に<em>痛みを知らぬ者 X+</em>という形式で表記される。このアビリティを持つ兵が【負傷限界】を<em>1ポイント</em>失うことになるたび、<em>D6</em>を1個ロールする。ロール結果が<em>X+</em>であれば、その【負傷限界】は失われない。",
-  ]},
-  { id:"ca11", name:"先手", body:[
-    "ユニット内のあらゆる兵がこのアビリティを持つならば、そのユニットは<em>先手ユニット</em>である。",
-    "白兵戦フェイズにおける先手解決ステップを参照せよ。",
-  ]},
-  { id:"ca12", name:"射撃デッキ", body:[
-    "このアビリティは常に<em>射撃デッキ X</em>という形式で表記される。自軍射撃フェイズ中、この兵員輸送が射撃のために選択されるたび、乗車ユニットが<em>1個でも</em>いるならば：",
-    "　<em>1.</em> 乗車中の兵を最大<em>X体</em>まで選択する。",
-    "　<em>2.</em> 選択した各兵の射撃武器（［一発限り］武器を除く）を<em>1個</em>選択する。",
-    "　<em>3.</em> この兵員輸送は、その攻撃をすべて解決し終えるまで、他の武器に加えて選択した武器もすべて持つ。",
-    "　<em>4.</em> ターン終了時まで、乗車しているユニットは射撃を宣言できない。",
-  ]},
-  { id:"ca13", name:"［暴発］", body:[
-    "ユニットが射撃や白兵戦のために選択された際、あらゆる攻撃を解決するよりも前に、武器選択ステップで選択した［暴発］武器の数に等しい<em>危機ロール</em>をする。",
-  ]},
-  { id:"ca14", name:"［ヘヴィ］", body:[
-    "自軍射撃フェイズ中、［ヘヴィ］武器による攻撃をするたび、攻撃側ユニットに以下の<em>すべて</em>が当てはまるなら、そのヒットロールは<em>+1</em>の修正を受ける：",
-    "　▪ そのユニットが<em>非接敵状態</em>である。",
-    "　▪ そのユニットが、そのターン中に戦場に配置されたものではない。",
-    "　▪ そのユニット内のどの兵も、そのターン中に<em>3mv</em>より多く移動していない。",
-  ]},
-  { id:"ca15", name:"ホバー", body:[
-    "このユニットが宙に舞い上がる際、最大距離から<em>2mv</em>を差し引かない。",
-  ]},
-  { id:"ca16", name:"［遮蔽無効］", body:[
-    "［遮蔽無効］武器で攻撃する際、攻撃対象はその攻撃に対して<em>遮蔽物ボーナスを受けることができない</em>。これは、兵やユニットに遮蔽物ボーナスを与えるルール（隠密能力など）も無効化する。",
-  ]},
-  { id:"ca17", name:"［間接射撃］", body:[
-    "［間接射撃］武器を持つ兵が<em>1個でも</em>含まれているユニットは、<em>間接射撃</em>を使用して射撃できる。",
-  ]},
-  { id:"ca18", name:"浸透戦術", body:[
-    "初期配置中、ユニット内のすべての兵がこのアビリティを有している場合、そのユニットを敵軍側初期配置ゾーンおよびあらゆる敵兵から水平方向に<em>8mv</em>より遠く離れた任意の地点に配置できる。",
-  ]},
-  { id:"ca19", name:"［ランス］", body:[
-    "［ランス］武器による攻撃をする際、攻撃側兵がそのターン中に突撃移動をしていたならば、ウーンズロールは<em>+1</em>の修正を受ける。",
-  ]},
-  { id:"ca20", name:"［会心ヒット］", body:[
-    "［会心ヒット］武器による攻撃でクリティカルヒットが発生した場合、その攻撃が対象に<em>自動的にダメージを与える</em>ことを選択してもよい。",
-  ]},
-  { id:"ca21", name:"単独工作員", body:[
-    "合流ユニットの一部でなく、敵兵から<em>12mv</em>以内に一部でも入っているのでない限り、このユニットは<em>視認されない</em>。また、合流ユニットの一部でなく、攻撃側兵がこのユニットの<em>12mv</em>以内に一部でも入っているのでない限り、［間接射撃］の対象にもならない。",
-    "このアビリティが<em>単独工作員Xmv</em>という形式で表記されている時、同様に距離は<em>Xmv</em>となる。",
-  ]},
-  { id:"ca22", name:"［メルタ］", body:[
-    "このアビリティは常に<em>［メルタ X］</em>という形式で表記される。兵が攻撃対象をその武器の【射程】の<em>半分以内</em>に選択したならば、その武器の【ダメージ量】は<em>+X</em>の修正を受ける。",
-    "例：兵が［メルタ <em>2</em>］、【ダメージ量】<em>D6</em>の武器で射程の半分以内のユニットを攻撃。その武器の【ダメージ量】は<em>D6+2</em>になる。",
-  ]},
-  { id:"ca23", name:"［一発限り］", body:[
-    "このアビリティを持つ武器は、バトル中<em>1回限り</em>攻撃のために選択できる。",
-    "撃破された兵がユニットに復帰したとしても、そのバトル中すでに攻撃のために選択された［一発限り］武器は、それ以上選択できない。",
-  ]},
-  { id:"ca24", name:"［ピストル］", body:[
-    "［ピストル］と［至近］は、ルール上<em>同一</em>のものである。［至近］を参照せよ。",
-  ]},
-  { id:"ca25", name:"［精密攻撃］", body:[
-    "［精密攻撃］武器による<em>1個以上</em>の攻撃を解決する際、割り当て順の宣言ステップにおいて、攻撃対象のユニットに攻撃側兵から視認できるキャラクター兵が<em>1体でも</em>含まれているならば、アクティブプレイヤーはそのキャラクターが含まれている割り当てグループを<em>1つ</em>選択してもよい。",
-  ]},
-  { id:"ca26", name:"［サイキック］", body:[
-    "［サイキック］武器で攻撃する際、自軍はその攻撃の【射撃技能】や【近接技能】に対する修正、そしてヒットロールに対する修正を、<em>任意に無視</em>してもよい。",
-    "［サイキック］武器による攻撃は<em>サイキック攻撃</em>と呼称される。",
-  ]},
-  { id:"ca27", name:"［ラピッドファイア］", body:[
-    "このアビリティは常に<em>［ラピッドファイア X］</em>という形式で表記される。攻撃対象のユニットが、その武器の【射程】の<em>半分以内</em>にいたならば、追加で<em>X個</em>の攻撃ダイスを得る。",
-    "例：［ラピッドファイア <em>1</em>］【攻撃回数】<em>1</em>の武器で射程の半分以内を攻撃。攻撃ダイスは<em>1個</em>増加（合計<em>2個</em>）。",
-  ]},
-  { id:"ca28", name:"斥候", body:[
-    "このアビリティは常に<em>斥候 Xmv</em>という形式で表記される。バトル開始前アビリティの解決ステップにおいて、ユニット内の全兵がこのアビリティを持つならば、以下の<em>1つ</em>を実行してもよい：",
-    "　▪ そのユニットが戦略的予備戦力にいるならば、自軍初期配置ゾーンに配置する。",
-    "　▪ そのユニットが自軍初期配置ゾーン内に全体が入っているならば、斥候移動（最大<em>Xmv</em>）できる。",
-    "　▪ 斥候移動後：自軍ユニットはあらゆる敵ユニットから水平方向に<em>8mv</em>より遠く離れていなければならない。",
-  ]},
-  { id:"ca29", name:"隠密能力", body:[
-    "ユニット内の全兵がこのアビリティを持つなら、そのユニットに対する射撃攻撃において、そのユニットは<em>遮蔽物ボーナス</em>を得る。",
-  ]},
-  { id:"ca30", name:"超重歩行兵器", body:[
-    "このアビリティを持つユニットが通常移動、全力移動、退却を実行する際：",
-    "　▪ そのユニット内の兵は兵を通り抜けて移動でき（モンスター/ビークルも含むが、巨大兵器は除く）、高さ<em>4mv</em>以下の特殊地形の部位を水平方向に通り抜けることができる。",
-    "　▪ そのユニットを移動させる前に、ユニット内の全兵に移動が終了するまで<em>高機動</em>キーワードを与えることを選択してもよい。そうする場合、その移動が終了した後で<em>D6</em>を1個ロールする。ロール結果が<em>1</em>であれば、そのユニットは<em>戦闘ショック状態</em>になる。",
-  ]},
-  { id:"ca31", name:"［連続命中］", body:[
-    "このアビリティは常に<em>［連続命中 X］</em>という形式で表記される。クリティカルヒットが発生したら、その攻撃は追加で<em>X回</em>ヒットする。",
-    "例：クリティカルヒット発生。ゆえにその攻撃は<em>3回</em>ヒットすることになる（クリティカルヒットから<em>1回</em>、［連続命中 2］アビリティから<em>2回</em>）。",
-  ]},
-  { id:"ca32", name:"［噴射］", body:[
-    "［噴射］武器による攻撃は、対象に<em>自動的にヒット</em>する。",
-  ]},
-  { id:"ca33", name:"［ツインリンク］", body:[
-    "［ツインリンク］武器による攻撃は、ウーンズロールを<em>何個でもリロール</em>できる。",
-  ]},
+  { id:"ca1",  name:"［特効］",       body:["このアビリティは常に<em>［X 特効 Y+］</em>という形式で表記される。攻撃対象が X 部分のキーワードを持つならば、ウーンズロールで修正前の出目<em>Y+</em>が出た場合、<em>クリティカルウーンズ</em>となる。"] },
+  { id:"ca2",  name:"［アサルト］",   body:["［アサルト］武器を持つ兵が<em>1個でも</em>含まれているユニットは、アサルト射撃を使用して射撃できる。"] },
+  { id:"ca3",  name:"［ブラスト］",   body:["攻撃対象選択ステップにおいて選択されたユニット内の兵<em>5体ごと</em>（端数切り下げ）に、追加で<em>1個</em>の攻撃ダイスを得る。","<em>［ブラストX］</em>の場合は兵<em>5体ごと</em>に追加で<em>X個</em>の攻撃ダイスを得る。"] },
+  { id:"ca4",  name:"［蹂躙］",       body:["常に<em>［蹂躙 X］</em>という形式で表記される。その武器のすべての攻撃で単一の対象を選択していたならば、選択されたユニット内の兵<em>5体ごと</em>（端数切り下げ）に、追加で<em>X個</em>の攻撃ダイスを得る。"] },
+  { id:"ca5",  name:"［至近］",       body:["［至近］武器を持つ兵が<em>1個でも</em>含まれているユニットは、至近射撃を使用して射撃できる。","それ以外の射撃タイプを使用している時、そのユニット内の各兵は以下のうち<em>1つ</em>だけを選択して攻撃できる：その兵が持つ<em>1個以上</em>の［至近］武器、またはその兵が持つ<em>1個以上</em>の他の射撃武器。"] },
+  { id:"ca6",  name:"恐るべき最期",   body:["常に<em>恐るべき最期 X</em>という形式で表記される。このユニット内の兵が撃破されるたび、緊急降車移動をした後で<em>D6</em>を1個ロールする。ロール結果が<em>6</em>であれば、その兵の<em>6mv</em>以内に一部でも入っているユニットは<em>Xポイント</em>の致命的ダメージを受ける。"] },
+  { id:"ca7",  name:"縦深攻撃",       body:["このユニットが突入移動をする際、ユニット内の全兵がこのアビリティを持っているならば、このユニットをあらゆる敵ユニットから水平方向に<em>8mv</em>より遠く離れるように、戦場の<em>任意の地点</em>に配置してもよい（敵軍初期配置ゾーン内も可能）。"] },
+  { id:"ca8",  name:"［会心ウーンズ］", body:["クリティカルウーンズが発生したならば、その攻撃手順はそこで終了し、攻撃対象ユニットはその武器の【ダメージ量】に等しいポイント数の<em>致命的ダメージ</em>を受ける。","致命的ダメージを与えることができるのは、<em>1回のクリティカルウーンズごとに最大で兵1体</em>に対してのみ。残りの致命的ダメージは失われる。"] },
+  { id:"ca9",  name:"［追加攻撃］",   body:["［追加攻撃］武器を持つ兵が<em>1体でも</em>含まれているユニットが白兵戦をする際、それらの兵はその他の武器に加えて該当の武器による攻撃もする。"] },
+  { id:"ca10", name:"痛みを知らぬ者", body:["常に<em>痛みを知らぬ者 X+</em>という形式で表記される。このアビリティを持つ兵が【負傷限界】を<em>1ポイント</em>失うことになるたび、<em>D6</em>を1個ロールする。ロール結果が<em>X+</em>であれば、その【負傷限界】は失われない。"] },
+  { id:"ca11", name:"先手",           body:["ユニット内のあらゆる兵がこのアビリティを持つならば、そのユニットは<em>先手ユニット</em>である。白兵戦フェイズにおける先手解決ステップを参照せよ。"] },
+  { id:"ca12", name:"射撃デッキ",     body:["常に<em>射撃デッキ X</em>という形式で表記される。自軍射撃フェイズ中、この兵員輸送が射撃のために選択されるたび、乗車ユニットが<em>1個でも</em>いるならば乗車中の兵を最大<em>X体</em>まで選択し、選択した各兵の射撃武器（一発限り武器を除く）を<em>1個</em>選択する。ターン終了時まで、乗車しているユニットは射撃を宣言できない。"] },
+  { id:"ca13", name:"［暴発］",       body:["ユニットが射撃や白兵戦のために選択された際、あらゆる攻撃を解決するよりも前に、武器選択ステップで選択した［暴発］武器の数に等しい<em>危機ロール</em>をする。"] },
+  { id:"ca14", name:"［ヘヴィ］",     body:["自軍射撃フェイズ中、攻撃側ユニットが非接敵状態・そのターン中に戦場に配置されていない・どの兵もそのターン中に<em>3mv</em>より多く移動していない場合、ヒットロールは<em>+1</em>の修正を受ける。"] },
+  { id:"ca15", name:"ホバー",         body:["このユニットが宙に舞い上がる際、最大距離から<em>2mv</em>を差し引かない。"] },
+  { id:"ca16", name:"［遮蔽無効］",   body:["攻撃する際、攻撃対象はその攻撃に対して<em>遮蔽物ボーナスを受けることができない</em>。隠密能力なども無効化する。"] },
+  { id:"ca17", name:"［間接射撃］",   body:["［間接射撃］武器を持つ兵が<em>1個でも</em>含まれているユニットは、<em>間接射撃</em>を使用して射撃できる。"] },
+  { id:"ca18", name:"浸透戦術",       body:["初期配置中、ユニット内のすべての兵がこのアビリティを有している場合、そのユニットを敵軍側初期配置ゾーンおよびあらゆる敵兵から水平方向に<em>8mv</em>より遠く離れた任意の地点に配置できる。"] },
+  { id:"ca19", name:"［ランス］",     body:["攻撃側兵がそのターン中に突撃移動をしていたならば、ウーンズロールは<em>+1</em>の修正を受ける。"] },
+  { id:"ca20", name:"［会心ヒット］", body:["クリティカルヒットが発生した場合、その攻撃が対象に<em>自動的にダメージを与える</em>ことを選択してもよい。"] },
+  { id:"ca21", name:"単独工作員",     body:["合流ユニットの一部でなく、敵兵から<em>12mv</em>以内に一部でも入っているのでない限り、このユニットは<em>視認されない</em>。また、攻撃側兵がこのユニットの<em>12mv</em>以内に一部でも入っているのでない限り、［間接射撃］の対象にもならない。"] },
+  { id:"ca22", name:"［メルタ］",     body:["常に<em>［メルタ X］</em>という形式で表記される。攻撃対象をその武器の【射程】の<em>半分以内</em>に選択したならば、その武器の【ダメージ量】は<em>+X</em>の修正を受ける。"] },
+  { id:"ca23", name:"［一発限り］",   body:["このアビリティを持つ武器は、バトル中<em>1回限り</em>攻撃のために選択できる。撃破された兵がユニットに復帰したとしても、そのバトル中すでに攻撃のために選択された武器は、それ以上選択できない。"] },
+  { id:"ca24", name:"［ピストル］",   body:["［ピストル］と［至近］は、ルール上<em>同一</em>のものである。［至近］を参照せよ。"] },
+  { id:"ca25", name:"［精密攻撃］",   body:["攻撃対象のユニットに攻撃側兵から視認できるキャラクター兵が<em>1体でも</em>含まれているならば、アクティブプレイヤーはそのキャラクターが含まれている割り当てグループを<em>1つ</em>選択してもよい。"] },
+  { id:"ca26", name:"［サイキック］", body:["攻撃する際、自軍はその攻撃の【射撃技能】や【近接技能】に対する修正、そしてヒットロールに対する修正を、<em>任意に無視</em>してもよい。サイキック攻撃と呼称される。"] },
+  { id:"ca27", name:"［ラピッドファイア］", body:["常に<em>［ラピッドファイア X］</em>という形式で表記される。攻撃対象のユニットが、その武器の【射程】の<em>半分以内</em>にいたならば、追加で<em>X個</em>の攻撃ダイスを得る。"] },
+  { id:"ca28", name:"斥候",           body:["常に<em>斥候 Xmv</em>という形式で表記される。バトル開始前アビリティの解決ステップにおいて、ユニット内の全兵がこのアビリティを持つならば、自軍初期配置ゾーン内のユニットは斥候移動（最大<em>Xmv</em>）できる。斥候移動後：あらゆる敵ユニットから水平方向に<em>8mv</em>より遠く離れていなければならない。"] },
+  { id:"ca29", name:"隠密能力",       body:["ユニット内の全兵がこのアビリティを持つなら、そのユニットに対する射撃攻撃において、そのユニットは<em>遮蔽物ボーナス</em>を得る。"] },
+  { id:"ca30", name:"超重歩行兵器",   body:["通常移動、全力移動、退却を実行する際：兵は兵を通り抜けて移動でき、高さ<em>4mv</em>以下の特殊地形の部位を水平方向に通り抜けることができる。","全兵に<em>高機動</em>キーワードを与えることを選択してもよい。そうする場合、移動終了後に<em>D6</em>を1個ロールする。ロール結果が<em>1</em>であれば、そのユニットは<em>戦闘ショック状態</em>になる。"] },
+  { id:"ca31", name:"［連続命中］",   body:["常に<em>［連続命中 X］</em>という形式で表記される。クリティカルヒットが発生したら、その攻撃は追加で<em>X回</em>ヒットする。"] },
+  { id:"ca32", name:"［噴射］",       body:["攻撃は、対象に<em>自動的にヒット</em>する。"] },
+  { id:"ca33", name:"［ツインリンク］", body:["攻撃は、ウーンズロールを<em>何個でもリロール</em>できる。"] },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -489,17 +365,35 @@ const S = {
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
-let _id=1; const uid=()=>String(_id++);
-const blankStats  = ()=>Object.fromEntries(STAT_KEYS.map(k=>[k,""]));
-const blankWeapon = ()=>({ id:uid(), name:"", type:"射撃", range:"", A:"", skill:"", BS:"", S:"", AP:"", D:"", abilities:"" });
-const loadRoster  = ()=>{ try{ return JSON.parse(localStorage.getItem(STORAGE_KEY)||"[]"); }catch{ return []; } };
-const saveRoster  = (r)=>{ try{ localStorage.setItem(STORAGE_KEY,JSON.stringify(r)); }catch{} };
+let _id=1;
+const uid          = ()=>String(_id++);
+const blankStats   = ()=>Object.fromEntries(STAT_KEYS.map(k=>[k,""]));
+const blankWeapon  = ()=>({ id:uid(), name:"", type:"射撃", range:"", A:"", skill:"", BS:"", S:"", AP:"", D:"", abilities:"" });
+const genRoomId    = ()=>Math.random().toString(36).substring(2,8).toUpperCase();
+
+// Firebase Firestore paths
+const roomRef  = (id)=>doc(db,"battleRooms",id);
+const rosterCol= ()=>collection(db,"roster");
+const rosterRef= (id)=>doc(db,"roster",id);
+
+// Default battle state written to Firestore
+const defaultBattleState = (names=["プレイヤー1","プレイヤー2"])=>({
+  players:[
+    { name:names[0], cp:0, vp:0, units:[] },
+    { name:names[1], cp:0, vp:0, units:[] },
+  ],
+  currentTurn:1,
+  activePlayer:0,
+  gameOver:false,
+  gameOverReason:"",
+  createdAt:new Date().toISOString(),
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RICH TEXT (renders <em> and .tl tooltip links)
+// RICH TEXT
 // ─────────────────────────────────────────────────────────────────────────────
 function RichText({ html, onTooltip }) {
-  const ref = useRef(null);
+  const ref=useRef(null);
   useEffect(()=>{
     if(!ref.current) return;
     ref.current.querySelectorAll(".tl").forEach(el=>{
@@ -514,7 +408,7 @@ function RichText({ html, onTooltip }) {
 // TOOLTIP POPUP
 // ─────────────────────────────────────────────────────────────────────────────
 function TooltipPopup({ tipKey, onClose }) {
-  const tip = TOOLTIPS[tipKey];
+  const tip=TOOLTIPS[tipKey];
   if(!tip) return null;
   return (
     <div style={S.overlay} onClick={onClose}>
@@ -523,7 +417,7 @@ function TooltipPopup({ tipKey, onClose }) {
           <div style={{ fontSize:14, fontWeight:"bold", color:"#D4AF37", letterSpacing:2 }}>※ {tip.title}</div>
           <button style={S.iconBtn()} onClick={onClose}>✕</button>
         </div>
-        <div style={{ display:"flex", flexDirection:"column", gap:8, textAlign:"left" }}>
+        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
           {tip.body.map((b,i)=>(
             <div key={i} style={{ fontSize:12, color:"#C8C8C8", lineHeight:1.7, borderLeft:"2px solid #D4AF3744", paddingLeft:10 }} dangerouslySetInnerHTML={{ __html:b }} />
           ))}
@@ -537,20 +431,33 @@ function TooltipPopup({ tipKey, onClose }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// COLLAPSIBLE SECTION
+// COLLAPSIBLE
 // ─────────────────────────────────────────────────────────────────────────────
-function Collapsible({ label, color="#D4AF37", defaultOpen=false, children }) {
-  const [open, setOpen] = useState(defaultOpen);
+function Collapsible({ label, color="#D4AF37", defaultOpen=false, badge=null, children }) {
+  const [open,setOpen]=useState(defaultOpen);
   return (
     <div>
-      <button
-        onClick={()=>setOpen(o=>!o)}
-        style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", background:"transparent", border:"none", cursor:"pointer", padding:"6px 0", fontFamily:"inherit" }}
-      >
-        <span style={{ fontSize:11, fontWeight:"bold", color, letterSpacing:2, textTransform:"uppercase" }}>{label}</span>
+      <button onClick={()=>setOpen(o=>!o)}
+        style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", background:"transparent", border:"none", cursor:"pointer", padding:"6px 0", fontFamily:"inherit" }}>
+        <span style={{ fontSize:11, fontWeight:"bold", color, letterSpacing:2, textTransform:"uppercase" }}>
+          {label}{badge&&<span style={{ marginLeft:8, fontSize:9, color:"#8B8B8B", fontWeight:"normal", textTransform:"none", letterSpacing:0 }}>{badge}</span>}
+        </span>
         <span style={{ fontSize:13, color, transform:open?"rotate(180deg)":"rotate(0deg)", transition:"transform .2s", lineHeight:1 }}>∧</span>
       </button>
       {open && <div style={{ marginTop:4 }}>{children}</div>}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COUNTER
+// ─────────────────────────────────────────────────────────────────────────────
+function Counter({ value, onChange, color, min=0, max=999 }) {
+  return (
+    <div style={{ display:"flex", alignItems:"center", gap:5, justifyContent:"center" }}>
+      <button style={S.ctrBtn(color)} onClick={()=>onChange(Math.max(min,value-1))}>−</button>
+      <span style={{ fontSize:20, fontWeight:"bold", color, minWidth:30, textAlign:"center", fontVariantNumeric:"tabular-nums" }}>{value}</span>
+      <button style={S.ctrBtn(color)} onClick={()=>onChange(Math.min(max,value+1))}>+</button>
     </div>
   );
 }
@@ -699,19 +606,19 @@ function PhasePanel({ onCPGrant }) {
   );
 }
 
+
 // ─────────────────────────────────────────────────────────────────────────────
 // STRATAGEMS PANEL
 // ─────────────────────────────────────────────────────────────────────────────
 function StratagemsPanel() {
-  const [openId, setOpenId] = useState(null);
+  const [openId,setOpenId]=useState(null);
   return (
     <div style={S.card}>
       <Collapsible label="基本策略" color="#D4AF37">
         <div style={{ display:"flex", flexDirection:"column", gap:4, marginTop:6 }}>
           {STRATAGEMS.map(s=>(
             <div key={s.id} style={{ background:"#0A0A0C", border:"1px solid #2A2A32", borderRadius:4 }}>
-              <button
-                onClick={()=>setOpenId(o=>o===s.id?null:s.id)}
+              <button onClick={()=>setOpenId(o=>o===s.id?null:s.id)}
                 style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", background:"transparent", border:"none", cursor:"pointer", padding:"8px 10px", fontFamily:"inherit" }}>
                 <span style={{ fontSize:12, fontWeight:"bold", color:"#E8E8E8", textAlign:"left" }}>{s.name}</span>
                 <div style={{ display:"flex", gap:8, alignItems:"center", flexShrink:0 }}>
@@ -719,7 +626,7 @@ function StratagemsPanel() {
                   <span style={{ fontSize:12, color:"#D4AF37" }}>{openId===s.id?"∧":"∨"}</span>
                 </div>
               </button>
-              {openId===s.id && (
+              {openId===s.id&&(
                 <div style={{ padding:"0 10px 10px 10px", display:"flex", flexDirection:"column", gap:5, borderTop:"1px solid #2A2A32" }}>
                   {s.body.map((b,i)=>(
                     <div key={i} style={{ fontSize:12, color:"#C8C8C8", lineHeight:1.65, marginTop:i===0?8:0 }} dangerouslySetInnerHTML={{ __html:b }} />
@@ -738,20 +645,19 @@ function StratagemsPanel() {
 // CORE ABILITIES PANEL
 // ─────────────────────────────────────────────────────────────────────────────
 function CoreAbilitiesPanel() {
-  const [openId, setOpenId] = useState(null);
+  const [openId,setOpenId]=useState(null);
   return (
     <div style={S.card}>
       <Collapsible label="コアアビリティ" color="#6A9BD4">
         <div style={{ display:"flex", flexDirection:"column", gap:4, marginTop:6 }}>
           {CORE_ABILITIES.map(a=>(
             <div key={a.id} style={{ background:"#0A0A0C", border:"1px solid #2A2A32", borderRadius:4 }}>
-              <button
-                onClick={()=>setOpenId(o=>o===a.id?null:a.id)}
+              <button onClick={()=>setOpenId(o=>o===a.id?null:a.id)}
                 style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", background:"transparent", border:"none", cursor:"pointer", padding:"7px 10px", fontFamily:"inherit" }}>
                 <span style={{ fontSize:12, fontWeight:"bold", color:"#6A9BD4", textAlign:"left" }}>{a.name}</span>
                 <span style={{ fontSize:12, color:"#6A9BD4", flexShrink:0 }}>{openId===a.id?"∧":"∨"}</span>
               </button>
-              {openId===a.id && (
+              {openId===a.id&&(
                 <div style={{ padding:"0 10px 10px 10px", display:"flex", flexDirection:"column", gap:5, borderTop:"1px solid #2A2A32" }}>
                   {a.body.map((b,i)=>(
                     <div key={i} style={{ fontSize:12, color:"#C8C8C8", lineHeight:1.65, marginTop:i===0?8:0 }} dangerouslySetInnerHTML={{ __html:b }} />
@@ -767,36 +673,27 @@ function CoreAbilitiesPanel() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// COUNTER
-// ─────────────────────────────────────────────────────────────────────────────
-function Counter({ value, onChange, color, min=0, max=999 }) {
-  return (
-    <div style={{ display:"flex", alignItems:"center", gap:5, justifyContent:"center" }}>
-      <button style={S.ctrBtn(color)} onClick={()=>onChange(Math.max(min,value-1))}>−</button>
-      <span style={{ fontSize:20, fontWeight:"bold", color, minWidth:30, textAlign:"center", fontVariantNumeric:"tabular-nums" }}>{value}</span>
-      <button style={S.ctrBtn(color)} onClick={()=>onChange(Math.min(max,value+1))}>+</button>
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // UNIT EDITOR MODAL
 // ─────────────────────────────────────────────────────────────────────────────
 function UnitEditorModal({ initial, onSave, onClose }) {
-  const [name,setName]         = useState(initial?.name||"");
-  const [faction,setFaction]   = useState(initial?.faction||"");
-  const [keywords,setKeywords] = useState(initial?.keywords||"");
-  const [pts,setPts]           = useState(initial?.pts||"");
-  const [stats,setStats]       = useState(initial?.stats||blankStats());
-  const [weapons,setWeapons]   = useState(initial?.weapons?.length?initial.weapons:[blankWeapon()]);
-  const [abilities,setAbilities]=useState(initial?.abilities||"");
-  const [notes,setNotes]       = useState(initial?.notes||"");
+  const [name,setName]           = useState(initial?.name||"");
+  const [faction,setFaction]     = useState(initial?.faction||"");
+  const [keywords,setKeywords]   = useState(initial?.keywords||"");
+  const [pts,setPts]             = useState(initial?.pts||"");
+  const [stats,setStats]         = useState(initial?.stats||blankStats());
+  const [weapons,setWeapons]     = useState(initial?.weapons?.length?initial.weapons:[blankWeapon()]);
+  const [abilities,setAbilities] = useState(initial?.abilities||"");
+  const [notes,setNotes]         = useState(initial?.notes||"");
 
   const setStat=(k,v)=>setStats(s=>({...s,[k]:v}));
   const updWeapon=(id,f,v)=>setWeapons(ws=>ws.map(w=>w.id===id?{...w,[f]:v}:w));
   const addWeapon=()=>setWeapons(ws=>[...ws,blankWeapon()]);
   const rmWeapon=(id)=>setWeapons(ws=>ws.filter(w=>w.id!==id));
-  const handleSave=()=>{ if(!name.trim()) return; onSave({ id:initial?.id||uid(), name:name.trim(), faction, keywords, pts, stats, weapons, abilities, notes }); onClose(); };
+  const handleSave=()=>{
+    if(!name.trim()) return;
+    onSave({ id:initial?.id||uid(), name:name.trim(), faction, keywords, pts, stats, weapons, abilities, notes });
+    onClose();
+  };
 
   return (
     <div style={S.overlay} onClick={onClose}>
@@ -851,7 +748,7 @@ function UnitEditorModal({ initial, onSave, onClose }) {
               <div style={{ display:"grid", gridTemplateColumns:"1fr auto auto", gap:6, alignItems:"center", marginBottom:6 }}>
                 <input style={S.input} value={w.name} onChange={e=>updWeapon(w.id,"name",e.target.value)} placeholder="武器名" />
                 <select style={{ ...S.select, width:"auto" }} value={w.type} onChange={e=>updWeapon(w.id,"type",e.target.value)}>
-                  <option>射撃</option><option>近接</option><option>グレネード</option>
+                  <option>射撃</option><option>近接</option>
                 </select>
                 <button style={S.iconBtn("#C0392B")} onClick={()=>rmWeapon(w.id)}>✕</button>
               </div>
@@ -865,14 +762,14 @@ function UnitEditorModal({ initial, onSave, onClose }) {
                 ))}
               </div>
               <input style={{ ...S.input, marginTop:6, fontSize:11 }} value={w.abilities}
-                onChange={e=>updWeapon(w.id,"abilities",e.target.value)} placeholder="特殊ルール（例: RAPID FIRE 1）" />
+                onChange={e=>updWeapon(w.id,"abilities",e.target.value)} placeholder="特殊ルール（例: ラピッドファイア 1）" />
             </div>
           ))}
         </div>
 
         <div style={{ marginBottom:10 }}>
           <div style={{ ...S.label, marginBottom:3 }}>アビリティ / 特殊ルール</div>
-          <textarea style={{ ...S.input, resize:"vertical", minHeight:50 }} value={abilities} onChange={e=>setAbilities(e.target.value)} placeholder="例: And They Shall Know No Fear" />
+          <textarea style={{ ...S.input, resize:"vertical", minHeight:50 }} value={abilities} onChange={e=>setAbilities(e.target.value)} placeholder="例: 痛みを知らぬ者など" />
         </div>
         <div style={{ marginBottom:16 }}>
           <div style={{ ...S.label, marginBottom:3 }}>メモ</div>
@@ -892,7 +789,10 @@ function UnitEditorModal({ initial, onSave, onClose }) {
 // ─────────────────────────────────────────────────────────────────────────────
 function RosterModal({ roster, onEdit, onDelete, onCreate, onClose }) {
   const [search,setSearch]=useState("");
-  const filtered=roster.filter(u=>u.name.toLowerCase().includes(search.toLowerCase())||(u.faction||"").toLowerCase().includes(search.toLowerCase()));
+  const filtered=roster.filter(u=>
+    u.name.toLowerCase().includes(search.toLowerCase())||
+    (u.faction||"").toLowerCase().includes(search.toLowerCase())
+  );
   return (
     <div style={S.overlay} onClick={onClose}>
       <div style={{ ...S.modal, maxWidth:640 }} onClick={e=>e.stopPropagation()}>
@@ -916,7 +816,9 @@ function RosterModal({ roster, onEdit, onDelete, onCreate, onClose }) {
             </div>
           ))
         }
-        <div style={{ marginTop:10, textAlign:"right" }}><button style={S.outlineBtn("#8B8B8B")} onClick={onClose}>閉じる</button></div>
+        <div style={{ marginTop:10, textAlign:"right" }}>
+          <button style={S.outlineBtn("#8B8B8B")} onClick={onClose}>閉じる</button>
+        </div>
       </div>
     </div>
   );
@@ -937,13 +839,16 @@ function QuickAddModal({ playerColor, playerName, roster, onAdd, onClose, onCrea
     <div style={S.overlay} onClick={onClose}>
       <div style={{ ...S.modal, maxWidth:440 }} onClick={e=>e.stopPropagation()}>
         <div style={{ ...S.gold, fontSize:13, marginBottom:10 }}>ユニット配置 — {playerName}</div>
-        {roster.length>0 ? (
+        {roster.length>0?(
           <>
             <div style={{ ...S.label, marginBottom:6 }}>ロスターから選択</div>
             <div style={{ maxHeight:240, overflowY:"auto", marginBottom:10 }}>
               {roster.map(u=>(
                 <div key={u.id}
-                  style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"7px 10px", background:selected?.id===u.id?"#1A2A32":"#0A0A0C", border:`1px solid ${selected?.id===u.id?playerColor:"#2A2A32"}`, borderRadius:4, marginBottom:4, cursor:"pointer" }}
+                  style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"7px 10px",
+                    background:selected?.id===u.id?"#1A2A32":"#0A0A0C",
+                    border:`1px solid ${selected?.id===u.id?playerColor:"#2A2A32"}`,
+                    borderRadius:4, marginBottom:4, cursor:"pointer" }}
                   onClick={()=>setSelected(u)}>
                   <div>
                     <div style={{ fontSize:12, color:"#E8E8E8" }}>{u.name}</div>
@@ -965,7 +870,7 @@ function QuickAddModal({ playerColor, playerName, roster, onAdd, onClose, onCrea
               <button style={S.solidBtn(playerColor)} onClick={handleDeploy} disabled={!selected}>配置</button>
             </div>
           </>
-        ) : (
+        ):(
           <div style={{ textAlign:"center", padding:"20px 0" }}>
             <div style={{ color:"#8B8B8B", fontSize:12, marginBottom:14 }}>ロスターにユニットがありません</div>
             <button style={S.solidBtn("#D4AF37")} onClick={onCreateNew}>ユニットを作成</button>
@@ -1059,7 +964,7 @@ function UnitRow({ unit, color, onWoundChange, onRemove, onDetail }) {
     <div style={{ display:"grid", gridTemplateColumns:"1fr auto auto auto auto", gap:4, alignItems:"center", padding:"5px 7px", background:"#0A0A0C", border:`1px solid ${isDead?"#C0392B44":"#2A2A32"}`, borderRadius:4, marginBottom:3, opacity:isDead?0.55:1 }}>
       <button style={{ background:"none", border:"none", cursor:"pointer", textAlign:"left", padding:0, color:isDead?"#8B8B8B":"#E8E8E8", fontSize:11, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", fontFamily:"inherit" }}
         onClick={()=>onDetail(unit)} title="詳細">
-        {unit.name} <span style={{ fontSize:9, color:"#8B8B8B" }}>ℹ</span>
+        {unit.name}<span style={{ fontSize:9, color:"#8B8B8B" }}> ℹ</span>
       </button>
       {isDead
         ? <span style={{ fontSize:9, color:"#C0392B", letterSpacing:1, textTransform:"uppercase", whiteSpace:"nowrap" }}>撃滅</span>
@@ -1075,18 +980,16 @@ function UnitRow({ unit, color, onWoundChange, onRemove, onDetail }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // GAME OVER SCREEN
 // ─────────────────────────────────────────────────────────────────────────────
-function GameOverScreen({ players, onReset, reason }) {
-  const winner = players[0].vp>players[1].vp ? players[0] : players[1].vp>players[0].vp ? players[1] : null;
-  const winnerColor = winner ? (winner===players[0]?PLAYER_COLORS[0]:PLAYER_COLORS[1]) : null;
+function GameOverScreen({ players, reason, onReset }) {
+  const winner=players[0].vp>players[1].vp?players[0]:players[1].vp>players[0].vp?players[1]:null;
+  const wColor=winner?(winner===players[0]?PLAYER_COLORS[0]:PLAYER_COLORS[1]):null;
   return (
     <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.96)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", zIndex:300, gap:14, padding:20 }}>
       <div style={{ fontSize:10, color:"#8B8B8B", letterSpacing:4, textTransform:"uppercase" }}>バトル終了 — {reason}</div>
       <div style={{ height:1, background:"linear-gradient(90deg,transparent,#D4AF37,transparent)", width:"100%", maxWidth:300 }} />
       {winner
-        ? <>
-            <div style={{ fontSize:26, fontWeight:"bold", letterSpacing:4, textTransform:"uppercase", color:winnerColor, textShadow:`0 0 30px ${winnerColor}`, textAlign:"center" }}>{winner.name}</div>
-            <div style={{ fontSize:13, color:"#D4AF37", letterSpacing:3 }}>勝利！ — {winner.vp} VP</div>
-          </>
+        ? <><div style={{ fontSize:26, fontWeight:"bold", letterSpacing:4, textTransform:"uppercase", color:wColor, textShadow:`0 0 30px ${wColor}`, textAlign:"center" }}>{winner.name}</div>
+            <div style={{ fontSize:13, color:"#D4AF37", letterSpacing:3 }}>勝利！ — {winner.vp} VP</div></>
         : <div style={{ fontSize:22, fontWeight:"bold", color:"#D4AF37", letterSpacing:5 }}>引き分け</div>
       }
       <div style={{ display:"flex", gap:24, marginTop:4, flexWrap:"wrap", justifyContent:"center" }}>
@@ -1104,161 +1007,289 @@ function GameOverScreen({ players, onReset, reason }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PLAYER CARD
+// ─────────────────────────────────────────────────────────────────────────────
+function PlayerCard({ player, pIdx, isActive, isInRoom, onUpdate, onAddUnit, onDetail, onSurrender }) {
+  const color=PLAYER_COLORS[pIdx];
+  const [unitsOpen,setUnitsOpen]=useState(true);
+  const [editingName,setEditingName]=useState(false);
+  const [nameInput,setNameInput]=useState(player.name);
+  const aliveCount=player.units.filter(u=>u.currentWounds>0).length;
+  const pts=player.units.reduce((s,u)=>s+(parseInt(u.pts)||0),0);
+
+  const commitName=()=>{
+    if(nameInput.trim()&&nameInput.trim()!==player.name) onUpdate(p=>({...p,name:nameInput.trim()}));
+    setEditingName(false);
+  };
+
+  return (
+    <div style={{ ...S.card, border:`1px solid ${color}${isActive?"99":"33"}`, borderTop:`3px solid ${color}` }}>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:10, flexWrap:"nowrap" }}>
+        <div style={{ width:7, height:7, background:color, borderRadius:"50%", boxShadow:`0 0 5px ${color}`, flexShrink:0 }} />
+        {editingName?(
+          <div style={{ display:"flex", gap:4, flex:1, minWidth:0 }}>
+            <input style={{ ...S.input, fontSize:12, padding:"2px 6px" }} value={nameInput}
+              onChange={e=>setNameInput(e.target.value)}
+              onKeyDown={e=>{ if(e.key==="Enter") commitName(); if(e.key==="Escape") setEditingName(false); }}
+              autoFocus />
+            <button style={S.solidBtn(color)} onClick={commitName} >✔</button>
+          </div>
+        ):(
+          <>
+            <span style={{ fontSize:11, fontWeight:"bold", letterSpacing:1, textTransform:"uppercase", color:isActive?color:"#E8E8E8", flex:1, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+              {player.name}
+            </span>
+            <button style={{ ...S.iconBtn("#8B8B8B"), flexShrink:0 }} onClick={()=>{ setNameInput(player.name); setEditingName(true); }} title="リネーム">✎</button>
+            {isActive&&<span style={{ fontSize:9, color, border:`1px solid ${color}66`, borderRadius:3, padding:"1px 5px", whiteSpace:"nowrap", flexShrink:0 }}>▶ 行動中</span>}
+          </>
+        )}
+      </div>
+
+      {/* CP / VP / PTS */}
+      <div style={{ display:"flex", gap:5, marginBottom:10 }}>
+        {[["CP","cp",20],["VP","vp",100]].map(([lbl,key,max])=>(
+          <div key={lbl} style={{ flex:1, background:"#0A0A0C", border:"1px solid #2A2A32", borderRadius:4, padding:"6px 4px", textAlign:"center" }}>
+            <div style={{ ...S.label, marginBottom:3, fontSize:8 }}>{lbl}</div>
+            <Counter value={player[key]} max={max} color={color} onChange={v=>onUpdate(p=>({...p,[key]:v}))} />
+          </div>
+        ))}
+        <div style={{ background:"#0A0A0C", border:"1px solid #2A2A32", borderRadius:4, padding:"6px 4px", textAlign:"center", minWidth:44 }}>
+          <div style={{ fontSize:8, color:"#8B8B8B", letterSpacing:1, textTransform:"uppercase", marginBottom:3 }}>コスト</div>
+          <div style={{ fontSize:15, fontWeight:"bold", color:"#D4AF37", lineHeight:1.3 }}>{pts}</div>
+        </div>
+      </div>
+
+      {/* Units collapsible */}
+      <div>
+        <button onClick={()=>setUnitsOpen(o=>!o)}
+          style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", background:"transparent", border:"none", cursor:"pointer", padding:"4px 0", fontFamily:"inherit", marginBottom:unitsOpen?4:0 }}>
+          <span style={{ ...S.label, fontSize:8 }}>ユニット ({aliveCount}/{player.units.length})</span>
+          <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+            <button style={{ ...S.outlineBtn(color), fontSize:10, padding:"2px 7px" }}
+              onClick={e=>{ e.stopPropagation(); onAddUnit(); }}>+ 配置</button>
+            <span style={{ fontSize:11, color, transform:unitsOpen?"rotate(180deg)":"rotate(0deg)", transition:"transform .2s" }}>∧</span>
+          </div>
+        </button>
+        {unitsOpen&&(
+          <div style={{ maxHeight:200, overflowY:"auto" }}>
+            {player.units.length===0
+              ? <div style={{ fontSize:11, color:"#2A2A32", textAlign:"center", padding:"10px 0" }}>ユニットなし</div>
+              : player.units.map(unit=>(
+                <UnitRow key={unit.id} unit={unit} color={color}
+                  onWoundChange={(id,d)=>onUpdate(p=>({...p,units:p.units.map(u=>u.id===id?{...u,currentWounds:Math.max(0,Math.min(u.maxWounds,u.currentWounds+d))}:u)}))}
+                  onRemove={(id)=>onUpdate(p=>({...p,units:p.units.filter(u=>u.id!==id)}))}
+                  onDetail={onDetail}
+                />
+              ))
+            }
+          </div>
+        )}
+      </div>
+
+      {/* Surrender */}
+      <div style={{ marginTop:8, textAlign:"right" }}>
+        <button style={{ ...S.outlineBtn("#C0392B"), fontSize:10, padding:"3px 8px" }} onClick={onSurrender}>🏳 投了</button>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MAIN APP
 // ─────────────────────────────────────────────────────────────────────────────
 export default function App() {
-  // Turn state: currentTurn 1-5, activePlayer 0 or 1
-  const [currentTurn,   setCurrentTurn]   = useState(1);
-  const [activePlayer,  setActivePlayer]  = useState(0); // 0 = P1, 1 = P2
-  const [gameOver,      setGameOver]      = useState(false);
-  const [gameOverReason,setGameOverReason]= useState("");
-
-  const [players, setPlayers] = useState([
+  // ── Battle state (synced via Firebase when in a room) ──
+  const [players, setPlayers]             = useState([
     { name:"プレイヤー1", cp:0, vp:0, units:[] },
     { name:"プレイヤー2", cp:0, vp:0, units:[] },
   ]);
+  const [currentTurn, setCurrentTurn]     = useState(1);
+  const [activePlayer, setActivePlayer]   = useState(0);
+  const [gameOver, setGameOver]           = useState(false);
+  const [gameOverReason, setGameOverReason]= useState("");
 
-  const [roster, setRoster] = useState(loadRoster);
-  useEffect(()=>{ saveRoster(roster); },[roster]);
+  // ── Firebase room ──
+  const [roomId, setRoomId]       = useState("");
+  const [joinInput, setJoinInput] = useState("");
+  const [syncing, setSyncing]     = useState(false);
+  const isInRoom = !!roomId;
+  const ignoreNextSnapshot = useRef(false); // prevent echo writes
 
-  const [addingUnit,      setAddingUnit]      = useState(null);
-  const [editingTemplate, setEditingTemplate] = useState(null);
-  const [viewingUnit,     setViewingUnit]     = useState(null);
-  const [showRoster,      setShowRoster]      = useState(false);
-  const [confirmSurrender,setConfirmSurrender]= useState(null);
-  const [roomId, setRoomId] = useState("");
-  const [joinRoomId, setJoinRoomId] = useState("");
-  const [roomData, setRoomData] = useState(null); // pIdx
+  // ── Firebase roster ──
+  const [roster, setRoster]     = useState([]);
+  const [rosterLoaded, setRosterLoaded] = useState(false);
 
-  const updatePlayer = (idx,fn) => setPlayers(prev=>prev.map((p,i)=>i===idx?fn(p):p));
-  const totalPts     = (player) => player.units.reduce((sum,u)=>sum+(parseInt(u.pts)||0),0);
+  // ── UI modals ──
+  const [addingUnit,       setAddingUnit]       = useState(null);
+  const [editingTemplate,  setEditingTemplate]  = useState(null);
+  const [viewingUnit,      setViewingUnit]       = useState(null);
+  const [showRoster,       setShowRoster]        = useState(false);
+  const [confirmSurrender, setConfirmSurrender]  = useState(null);
 
-  // CP grant: +1 to both
-  const handleCPGrant = useCallback(()=>{
-    setPlayers(prev=>prev.map(p=>({ ...p, cp:p.cp+1 })));
+  // ── Load roster from Firestore on mount ──
+  useEffect(()=>{
+    const q=query(rosterCol(), orderBy("createdAt","asc"));
+    const unsub=onSnapshot(q,(snap)=>{
+      const data=snap.docs.map(d=>({ ...d.data(), _docId:d.id }));
+      setRoster(data);
+      setRosterLoaded(true);
+    });
+    return unsub;
   },[]);
 
-  const handleAddUnit=(pIdx,template)=>{
-    updatePlayer(pIdx,p=>({ ...p, units:[...p.units,template] }));
-  };
-
-  const handleWoundChange=(pIdx,unitId,delta)=>{
-    updatePlayer(pIdx,p=>({
-      ...p,
-      units:p.units.map(u=>{
-        if(u.id!==unitId) return u;
-        const next=Math.max(0,Math.min(u.maxWounds,u.currentWounds+delta));
-        return { ...u, currentWounds:next };
-      }),
-    }));
-    if(viewingUnit?.pIdx===pIdx&&viewingUnit?.unit?.id===unitId){
-      setViewingUnit(v=>({ ...v, unit:{ ...v.unit, currentWounds:Math.max(0,Math.min(v.unit.maxWounds,v.unit.currentWounds+delta)) } }));
+  // ── Save roster unit to Firestore ──
+  const saveTemplate=async(unit)=>{
+    const payload={ ...unit, createdAt:unit.createdAt||new Date().toISOString() };
+    if(unit._docId){
+      await updateDoc(rosterRef(unit._docId), payload);
+    } else {
+      const ref=await addDoc(rosterCol(), payload);
+      // Firestore snapshot will update roster automatically
     }
   };
-
-  const handleRemoveUnit=(pIdx,unitId)=>{
-    updatePlayer(pIdx,p=>({ ...p, units:p.units.filter(x=>x.id!==unitId) }));
+  const deleteTemplate=async(id)=>{
+    // id is either the _docId (Firestore doc id) or unit.id
+    const unit=roster.find(u=>u.id===id||u._docId===id);
+    if(unit?._docId) await deleteDoc(rosterRef(unit._docId));
   };
 
-  const saveTemplate =(unit)=>setRoster(r=>r.some(u=>u.id===unit.id)?r.map(u=>u.id===unit.id?unit:u):[...r,unit]);
-  const deleteTemplate=(id)=>setRoster(r=>r.filter(u=>u.id!==id));
+  // ── Build current battle state object ──
+  const getBattleState=()=>({
+    players, currentTurn, activePlayer, gameOver, gameOverReason,
+    updatedAt:new Date().toISOString(),
+  });
 
-  // Advance turn: P1T1 → P2T1 → P1T2 → P2T2 … → P2T5 → game over
+  // ── Write battle state to Firestore ──
+  const pushToFirebase=useCallback(async(state)=>{
+    if(!roomId) return;
+    ignoreNextSnapshot.current=true;
+    await setDoc(roomRef(roomId), state, { merge:true });
+  },[roomId]);
+
+  // ── Subscribe to room changes ──
+  useEffect(()=>{
+    if(!roomId) return;
+    const unsub=onSnapshot(roomRef(roomId),(snap)=>{
+      if(!snap.exists()) return;
+      if(ignoreNextSnapshot.current){ ignoreNextSnapshot.current=false; return; }
+      const d=snap.data();
+      if(d.players)       setPlayers(d.players);
+      if(d.currentTurn!=null) setCurrentTurn(d.currentTurn);
+      if(d.activePlayer!=null) setActivePlayer(d.activePlayer);
+      if(d.gameOver!=null)    setGameOver(d.gameOver);
+      if(d.gameOverReason!=null) setGameOverReason(d.gameOverReason);
+    });
+    return unsub;
+  },[roomId]);
+
+  // ── Create room ──
+  const createRoom=async()=>{
+    const id=genRoomId();
+    const state={ ...defaultBattleState([players[0].name,players[1].name]), createdAt:new Date().toISOString() };
+    await setDoc(roomRef(id), state);
+    setRoomId(id);
+    // reset local state to match
+    setPlayers(state.players);
+    setCurrentTurn(state.currentTurn);
+    setActivePlayer(state.activePlayer);
+    setGameOver(false); setGameOverReason("");
+  };
+
+  // ── Join room ──
+  const joinRoom=async()=>{
+    const id=joinInput.trim().toUpperCase();
+    if(!id) return;
+    const snap=await getDoc(roomRef(id));
+    if(!snap.exists()){ alert("ルームが見つかりません"); return; }
+    const d=snap.data();
+    setRoomId(id);
+    if(d.players)       setPlayers(d.players);
+    if(d.currentTurn!=null) setCurrentTurn(d.currentTurn);
+    if(d.activePlayer!=null) setActivePlayer(d.activePlayer);
+    if(d.gameOver!=null)    setGameOver(d.gameOver);
+    if(d.gameOverReason!=null) setGameOverReason(d.gameOverReason);
+    setJoinInput("");
+  };
+
+  // ── Generic state updater that also pushes to Firebase ──
+  const updateAndPush=(updater)=>{
+    setPlayers(prev=>{
+      const next=typeof updater==="function"?updater(prev):updater;
+      const state={ ...getBattleState(), players:next };
+      pushToFirebase(state);
+      return next;
+    });
+  };
+
+  const updatePlayer=(idx,fn)=>{
+    updateAndPush(prev=>prev.map((p,i)=>i===idx?fn(p):p));
+  };
+
+  const updateGameState=(patch)=>{
+    const nextTurn   = patch.currentTurn   ?? currentTurn;
+    const nextAP     = patch.activePlayer  ?? activePlayer;
+    const nextGO     = patch.gameOver      ?? gameOver;
+    const nextGOR    = patch.gameOverReason?? gameOverReason;
+    if(patch.currentTurn!=null)    setCurrentTurn(nextTurn);
+    if(patch.activePlayer!=null)   setActivePlayer(nextAP);
+    if(patch.gameOver!=null)       setGameOver(nextGO);
+    if(patch.gameOverReason!=null) setGameOverReason(nextGOR);
+    pushToFirebase({ players, currentTurn:nextTurn, activePlayer:nextAP, gameOver:nextGO, gameOverReason:nextGOR, updatedAt:new Date().toISOString() });
+  };
+
+  // ── CP grant (+1 both players) ──
+  const handleCPGrant=useCallback(()=>{
+    updateAndPush(prev=>prev.map(p=>({...p,cp:p.cp+1})));
+  },[roomId]);
+
+  // ── Add unit to player ──
+  const handleAddUnit=(pIdx,template)=>{
+    updatePlayer(pIdx,p=>({...p,units:[...p.units,template]}));
+  };
+
+  // ── Next turn ──
   const nextTurn=()=>{
     if(activePlayer===0){
-      setActivePlayer(1);
+      updateGameState({ activePlayer:1 });
     } else {
       if(currentTurn>=TOTAL_TURNS){
-        setGameOverReason(`全${TOTAL_TURNS}ターン完了`);
-        setGameOver(true);
+        updateGameState({ gameOver:true, gameOverReason:`全${TOTAL_TURNS}ターン完了` });
       } else {
-        setCurrentTurn(t=>t+1);
-        setActivePlayer(0);
+        updateGameState({ currentTurn:currentTurn+1, activePlayer:0 });
       }
     }
   };
 
+  // ── Surrender ──
   const handleSurrender=(pIdx)=>{
     setConfirmSurrender(null);
-    setGameOverReason(`${players[pIdx].name} 投了`);
-    setGameOver(true);
+    updateGameState({ gameOver:true, gameOverReason:`${players[pIdx].name} 投了` });
   };
 
+  // ── Reset game ──
   const resetGame=()=>{
+    const state=defaultBattleState([players[0].name,players[1].name]);
+    setPlayers(state.players);
     setCurrentTurn(1); setActivePlayer(0); setGameOver(false); setGameOverReason("");
-    setPlayers([
-      { name:"プレイヤー1", cp:0, vp:0, units:[] },
-      { name:"プレイヤー2", cp:0, vp:0, units:[] },
-    ]);
+    if(roomId) pushToFirebase({ ...state, updatedAt:new Date().toISOString() });
   };
 
-  const testFirebase = async () => {
-    await setDoc(doc(db, "battleRooms", "testRoom"), {
-      vp: 10,
-      cp: 3,
-      updatedAt: new Date().toISOString()
-    });
+  const activePColor=PLAYER_COLORS[activePlayer];
 
-    alert("Firebase保存成功！");
-  };
-
-  const createRoom = async () => {
-  const id = Math.random()
-    .toString(36)
-    .substring(2, 8)
-    .toUpperCase();
-  await setDoc(doc(db, "battleRooms", id), {
-    player1VP: 0,
-    player1CP: 0,
-    player2VP: 0,
-    player2CP: 0,
-    currentTurn: 1,
-    activePlayer: 0,
-    createdAt: new Date().toISOString()
-  });
-  setRoomId(id);
-  onSnapshot(doc(db, "battleRooms", id), (snapshot) => { setRoomData(snapshot.data()); });
-  alert(`ルーム作成成功\n${id}`);
-};
-
-const joinRoom = async () => {
-  const roomRef = doc(db, "battleRooms", joinRoomId);
-  const roomSnap = await getDoc(roomRef);
-
-  if (!roomSnap.exists()) {
-    alert("ルームが見つかりません");
-    return;
-  }
-  setRoomId(joinRoomId);
-  onSnapshot( doc(db, "battleRooms", joinRoomId), (snapshot) => { setRoomData(snapshot.data()); } );
-  alert(`ルーム参加成功\n${joinRoomId}`);
-};
-
-const addVP = async () => {
-  if (!roomId || !roomData) return;
-  await setDoc(
-    doc(db, "battleRooms", roomId),
-    {
-      ...roomData,
-      player1VP: (roomData.player1VP || 0) + 1
-    }
-  );
-};
-
-  const activePColor = PLAYER_COLORS[activePlayer];
   return (
     <div style={S.app}>
       {/* ── HEADER ── */}
       <div style={S.header}>
         <div style={{ minWidth:0 }}>
-          <div style={S.headerTitle}>⚙ WH40K Battle Manager</div>
-          <div style={S.headerSub}>対戦管理ツール（11版）</div>
+          <div style={S.headerTitle}>⚙ WARHAMMER 40K Battle Manager</div>
+          <div style={S.headerSub}>β版 対戦管理ツール（11版）</div>
         </div>
         <div style={{ display:"flex", gap:6, alignItems:"center", flexShrink:0 }}>
           <button style={S.outlineBtn("#D4AF37")} onClick={()=>setShowRoster(true)}>📋 ロスター</button>
           {/* Turn badge */}
           <div style={{ background:"#1A1A1F", border:`2px solid ${activePColor}`, borderRadius:5, padding:"4px 10px", textAlign:"center", minWidth:68 }}>
-            <div style={{ fontSize:10, color:activePColor, letterSpacing:1, textTransform:"uppercase", lineHeight:1 }}>
+            <div style={{ fontSize:10, color:activePColor, letterSpacing:1, textTransform:"uppercase", lineHeight:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:90 }}>
               {players[activePlayer].name}
             </div>
             <div style={{ fontSize:18, fontWeight:"bold", color:"#D4AF37", lineHeight:1.2 }}>T{currentTurn}/{TOTAL_TURNS}</div>
@@ -1266,122 +1297,67 @@ const addVP = async () => {
         </div>
       </div>
 
-      {roomId && (
-  <div
-    style={{
-      background:"#0A0A0C",
-      padding:"8px",
-      border:"1px solid #3498DB",
-      borderRadius:"4px",
-      marginBottom:"10px",
-      color:"#FFFFFF"
-    }}
-  >
-    ルームID: {roomId}
-  </div>
-)}
-      {roomData && (
-  <div
-    style={{
-      background:"#111",
-      padding:"10px",
-      border:"1px solid #444",
-      marginBottom:"10px"
-    }}
-  >
-    <div>Player1 VP: {roomData.player1VP}</div>
-    <div>Player2 VP: {roomData.player2VP}</div>
-    <div>Turn: {roomData.currentTurn}</div>
-  </div>
-)}
+      {/* ── ROOM BAR ── */}
+      <div style={{ background:"#0F0F14", borderBottom:"1px solid #2A2A32", padding:"8px 14px", display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+        {/* Room ID display */}
+        {roomId&&(
+          <div style={{ display:"flex", alignItems:"center", gap:6, background:"#1A1A1F", border:"1px solid #D4AF3766", borderRadius:4, padding:"4px 10px", flexShrink:0 }}>
+            <span style={{ fontSize:9, color:"#8B8B8B", letterSpacing:2, textTransform:"uppercase" }}>ルームID</span>
+            <span style={{ fontSize:14, fontWeight:"bold", color:"#D4AF37", letterSpacing:3, fontVariantNumeric:"tabular-nums" }}>{roomId}</span>
+            <button style={{ ...S.iconBtn("#8B8B8B"), width:18, height:18, fontSize:10 }}
+              onClick={()=>{ navigator.clipboard?.writeText(roomId); }} title="コピー">⧉</button>
+          </div>
+        )}
+
+        {/* Join input */}
+        {!roomId&&(
+          <div style={{ display:"flex", gap:5, alignItems:"center", flex:1, minWidth:160, maxWidth:300 }}>
+            <input
+              style={{ ...S.input, fontSize:13, letterSpacing:3, textTransform:"uppercase", maxWidth:120, padding:"5px 8px" }}
+              value={joinInput} onChange={e=>setJoinInput(e.target.value.toUpperCase())}
+              placeholder="ルームID" maxLength={6}
+              onKeyDown={e=>{ if(e.key==="Enter") joinRoom(); }}
+            />
+            <button style={{ ...S.solidBtn("#1A6B8A"), fontSize:11, padding:"5px 12px" }} onClick={joinRoom}>参加</button>
+          </div>
+        )}
+
+        {/* Create room / leave */}
+        {!roomId?(
+          <button style={{ ...S.solidBtn("#6A5ACD"), fontSize:11, padding:"5px 12px" }} onClick={createRoom}>ルーム作成</button>
+        ):(
+          <button style={{ ...S.outlineBtn("#8B8B8B"), fontSize:11 }} onClick={()=>setRoomId("")}>退出</button>
+        )}
+
+        {/* Turn nav */}
+        <div style={{ marginLeft:"auto", display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+          <span style={{ fontSize:11, color:activePColor, fontWeight:"bold", whiteSpace:"nowrap" }}>
+            {players[activePlayer].name}のターン
+            <span style={{ color:"#8B8B8B", fontWeight:"normal" }}>　{currentTurn} / {TOTAL_TURNS}</span>
+          </span>
+          <button style={S.solidBtn("#D4AF37")} onClick={nextTurn}>
+            {activePlayer===0?`${players[1].name}のターン →`:currentTurn>=TOTAL_TURNS?"ゲーム終了":`ターン${currentTurn+1}へ →`}
+          </button>
+        </div>
+      </div>
 
       <div style={S.main}>
+        {/* ── PLAYERS (縦並び) ── */}
+        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          {players.map((player,pIdx)=>(
+            <PlayerCard key={pIdx} player={player} pIdx={pIdx}
+              isActive={pIdx===activePlayer}
+              isInRoom={isInRoom}
+              onUpdate={(fn)=>updatePlayer(pIdx,fn)}
+              onAddUnit={()=>setAddingUnit(pIdx)}
+              onDetail={(u)=>setViewingUnit({ unit:u, pIdx })}
+              onSurrender={()=>setConfirmSurrender(pIdx)}
+            />
+          ))}
+        </div>
+
         {/* ── PHASE PANEL ── */}
         <PhasePanel onCPGrant={handleCPGrant} />
-
-        {/* ── TURN NAV ── */}
-        <div style={{ display:"flex", gap:8, justifyContent:"space-between", flexWrap:"wrap", alignItems:"center" }}>
-          <div style={{ fontSize:11, color:activePColor, fontWeight:"bold" }}>
-            アクティブプレイヤー：{players[activePlayer].name}
-            <span style={{ color:"#8B8B8B", fontWeight:"normal" }}>　ターン {currentTurn} / {TOTAL_TURNS}</span>
-          </div>
-          <div style={{ display:"flex", gap:6 }}>
-            <input value={joinRoomId} onChange={(e)=>setJoinRoomId(e.target.value.toUpperCase())} placeholder="ルームID" style={{ padding:"6px", borderRadius:"4px" }}/>
-            <button style={S.solidBtn("#2ECC71")} onClick={joinRoom}>
-              参加
-            </button>
-            <button style={S.solidBtn("#3498DB")} onClick={createRoom}>
-              ルーム作成
-            </button>
-            <button style={S.solidBtn("#E67E22")} onClick={addVP}>
-              VP+1
-            </button>
-            <button style={S.solidBtn("#4CAF50")} onClick={testFirebase}>
-               Firebaseテスト
-            </button>
-            <button style={S.solidBtn("#D4AF37")} onClick={nextTurn}>
-              {activePlayer===0 ? `${players[1].name}のターン →` : currentTurn>=TOTAL_TURNS ? "ゲーム終了" : `ターン${currentTurn+1}へ →`}
-            </button>
-          </div>
-        </div>
-
-        {/* ── PLAYERS ── */}
-        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
-          {players.map((player,pIdx)=>{
-            const color=PLAYER_COLORS[pIdx];
-            const isActive=pIdx===activePlayer;
-            const aliveCount=player.units.filter(u=>u.currentWounds>0).length;
-            const pts=totalPts(player);
-            return (
-              <div key={pIdx} style={{ ...S.card, border:`1px solid ${color}${isActive?"99":"33"}`, borderTop:`3px solid ${color}` }}>
-                {/* Player header */}
-                <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:10, flexWrap:"wrap" }}>
-                  <div style={{ width:7, height:7, background:color, borderRadius:"50%", boxShadow:`0 0 5px ${color}`, flexShrink:0 }} />
-                  <span style={{ fontSize:11, fontWeight:"bold", letterSpacing:1, textTransform:"uppercase", color:isActive?color:"#E8E8E8", flex:1, minWidth:0 }}>{player.name}</span>
-                  {isActive && <span style={{ fontSize:9, color:color, border:`1px solid ${color}66`, borderRadius:3, padding:"1px 5px", whiteSpace:"nowrap" }}>▶ 行動中</span>}
-                </div>
-
-                {/* CP / VP / PTS */}
-                <div style={{ display:"flex", gap:5, marginBottom:10 }}>
-                  {[["CP","cp",20],["VP","vp",100]].map(([lbl,key,max])=>(
-                    <div key={lbl} style={{ flex:1, background:"#0A0A0C", border:"1px solid #2A2A32", borderRadius:4, padding:"6px 4px", textAlign:"center" }}>
-                      <div style={{ ...S.label, marginBottom:3, fontSize:8 }}>{lbl}</div>
-                      <Counter value={player[key]} max={max} color={color}
-                        onChange={v=>updatePlayer(pIdx,p=>({ ...p,[key]:v }))} />
-                    </div>
-                  ))}
-                  <div style={{ background:"#0A0A0C", border:"1px solid #2A2A32", borderRadius:4, padding:"6px 4px", textAlign:"center", minWidth:44 }}>
-                    <div style={{ fontSize:8, color:"#8B8B8B", letterSpacing:1, textTransform:"uppercase", marginBottom:3 }}>コスト</div>
-                    <div style={{ fontSize:15, fontWeight:"bold", color:"#D4AF37", lineHeight:1 }}>{pts}</div>
-                  </div>
-                </div>
-
-                {/* Units */}
-                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:5 }}>
-                  <span style={{ ...S.label, fontSize:8 }}>ユニット ({aliveCount}/{player.units.length})</span>
-                  <button style={{ ...S.outlineBtn(color), fontSize:10, padding:"3px 8px" }} onClick={()=>setAddingUnit(pIdx)}>+ 配置</button>
-                </div>
-                <div style={{ maxHeight:200, overflowY:"auto" }}>
-                  {player.units.length===0
-                    ? <div style={{ fontSize:11, color:"#2A2A32", textAlign:"center", padding:"10px 0" }}>ユニットなし</div>
-                    : player.units.map(unit=>(
-                      <UnitRow key={unit.id} unit={unit} color={color}
-                        onWoundChange={(id,d)=>handleWoundChange(pIdx,id,d)}
-                        onRemove={(id)=>handleRemoveUnit(pIdx,id)}
-                        onDetail={(u)=>setViewingUnit({ unit:u, pIdx })}
-                      />
-                    ))
-                  }
-                </div>
-
-                {/* Surrender button */}
-                <div style={{ marginTop:8, textAlign:"right" }}>
-                  <button style={{ ...S.outlineBtn("#C0392B"), fontSize:10, padding:"3px 8px" }} onClick={()=>setConfirmSurrender(pIdx)}>🏳 投了</button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
 
         {/* ── STRATAGEMS ── */}
         <StratagemsPanel />
@@ -1420,7 +1396,9 @@ const addVP = async () => {
       )}
       {viewingUnit&&(
         <UnitDetailModal unit={viewingUnit.unit} color={PLAYER_COLORS[viewingUnit.pIdx]}
-          onWoundChange={(id,d)=>handleWoundChange(viewingUnit.pIdx,id,d)}
+          onWoundChange={(id,d)=>updatePlayer(viewingUnit.pIdx,p=>({
+            ...p, units:p.units.map(u=>u.id===id?{...u,currentWounds:Math.max(0,Math.min(u.maxWounds,u.currentWounds+d))}:u)
+          }))}
           onClose={()=>setViewingUnit(null)}
         />
       )}
