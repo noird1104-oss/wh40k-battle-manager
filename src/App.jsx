@@ -417,9 +417,9 @@ function TooltipPopup({ tipKey, onClose }) {
           <div style={{ fontSize:14, fontWeight:"bold", color:"#D4AF37", letterSpacing:2 }}>※ {tip.title}</div>
           <button style={S.iconBtn()} onClick={onClose}>✕</button>
         </div>
-        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+        <div style={{ display:"flex", flexDirection:"column", gap:8, textAlign:"left" }}>
           {tip.body.map((b,i)=>(
-            <div key={i} style={{ fontSize:12, color:"#C8C8C8", lineHeight:1.7, borderLeft:"2px solid #D4AF3744", paddingLeft:10 }} dangerouslySetInnerHTML={{ __html:b }} />
+            <div key={i} style={{ fontSize:12, color:"#C8C8C8", lineHeight:1.7, borderLeft:"2px solid #D4AF3744", paddingLeft:10, textAlign:"left" }} dangerouslySetInnerHTML={{ __html:b }} />
           ))}
         </div>
         <div style={{ marginTop:14, textAlign:"right" }}>
@@ -433,13 +433,13 @@ function TooltipPopup({ tipKey, onClose }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // COLLAPSIBLE
 // ─────────────────────────────────────────────────────────────────────────────
-function Collapsible({ label, color="#D4AF37", defaultOpen=false, badge=null, children }) {
+function Collapsible({ label, color="#D4AF37", defaultOpen=false, badge=null, fontSize=12, children }) {
   const [open,setOpen]=useState(defaultOpen);
   return (
     <div>
       <button onClick={()=>setOpen(o=>!o)}
         style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", background:"transparent", border:"none", cursor:"pointer", padding:"6px 0", fontFamily:"inherit" }}>
-        <span style={{ fontSize:11, fontWeight:"bold", color, letterSpacing:2, textTransform:"uppercase" }}>
+        <span style={{ fontSize, fontWeight:"bold", color, letterSpacing:2, textTransform:"uppercase" }}>
           {label}{badge&&<span style={{ marginLeft:8, fontSize:9, color:"#8B8B8B", fontWeight:"normal", textTransform:"none", letterSpacing:0 }}>{badge}</span>}
         </span>
         <span style={{ fontSize:13, color, transform:open?"rotate(180deg)":"rotate(0deg)", transition:"transform .2s", lineHeight:1 }}>∧</span>
@@ -465,12 +465,12 @@ function Counter({ value, onChange, color, min=0, max=999 }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // PHASE PANEL
 // ─────────────────────────────────────────────────────────────────────────────
-function PhasePanel({ onCPGrant }) {
-  const [phaseIdx, setPhaseIdx]   = useState(0);
-  const [stepIdx, setStepIdx]     = useState(0);
-  const [openPhases, setOpenPhases] = useState({ 0:true }); // which phases show sub-steps
-  const [tooltip, setTooltip]     = useState(null);
-  const [cpGrantedThisStep, setCpGrantedThisStep] = useState(false);
+function PhasePanel() {
+  const [panelOpen, setPanelOpen]   = useState(false);
+  const [phaseIdx, setPhaseIdx]     = useState(0);
+  const [stepIdx, setStepIdx]       = useState(0);
+  const [openPhases, setOpenPhases] = useState({ 0:true });
+  const [tooltip, setTooltip]       = useState(null);
 
   const phase   = PHASES[phaseIdx];
   const phColor = PHASE_COLORS[phase.id] || "#D4AF37";
@@ -478,28 +478,19 @@ function PhasePanel({ onCPGrant }) {
 
   const togglePhaseOpen = (pi) => setOpenPhases(o=>({ ...o, [pi]:!o[pi] }));
 
-  const activateStep = (pi, si, skipCpCheck=false) => {
-    const ph  = PHASES[pi];
-    const st  = ph.steps[si];
-    setPhaseIdx(pi); setStepIdx(si); setCpGrantedThisStep(false);
+  const activateStep = (pi, si) => {
+    setPhaseIdx(pi); setStepIdx(si);
     setOpenPhases(o=>({ ...o, [pi]:true }));
-    if(st?.cpGrant && !skipCpCheck) { onCPGrant(); setCpGrantedThisStep(true); }
   };
 
   const activatePhase = (pi) => {
-    const ph = PHASES[pi];
-    const st = ph.steps[0];
-    setPhaseIdx(pi); setStepIdx(0); setCpGrantedThisStep(false);
+    setPhaseIdx(pi); setStepIdx(0);
     setOpenPhases(o=>({ ...o, [pi]:true }));
-    if(st?.cpGrant) { onCPGrant(); setCpGrantedThisStep(true); }
   };
 
   const goNext = () => {
     if(stepIdx < phase.steps.length-1) {
-      const ni = stepIdx+1;
-      const ns = phase.steps[ni];
-      setStepIdx(ni); setCpGrantedThisStep(false);
-      if(ns?.cpGrant && !cpGrantedThisStep) { onCPGrant(); setCpGrantedThisStep(true); }
+      setStepIdx(si => si+1);
     } else if(phaseIdx < PHASES.length-1) {
       activatePhase(phaseIdx+1);
     }
@@ -510,9 +501,15 @@ function PhasePanel({ onCPGrant }) {
   return (
     <>
       <div style={S.card}>
-        <div style={{ ...S.label, marginBottom:8 }}>フェイズ進行</div>
+        {/* Panel header with top-level collapse toggle */}
+        <button onClick={()=>setPanelOpen(o=>!o)}
+          style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", background:"transparent", border:"none", cursor:"pointer", padding:"2px 0", marginBottom:panelOpen?10:0, fontFamily:"inherit" }}>
+          <span style={{ fontSize:12, fontWeight:"bold", color:"#D4AF37", letterSpacing:2, textTransform:"uppercase" }}>フェイズ進行</span>
+          <span style={{ fontSize:13, color:"#D4AF37", transform:panelOpen?"rotate(180deg)":"rotate(0deg)", transition:"transform .2s", lineHeight:1 }}>∧</span>
+        </button>
 
-        {/* Phase tabs — always visible */}
+        {panelOpen && <>
+        {/* Phase tabs */}
         <div style={{ display:"flex", flexDirection:"column", gap:2, marginBottom:10 }}>
           {PHASES.map((ph, pi)=>{
             const pc   = PHASE_COLORS[ph.id]||"#D4AF37";
@@ -558,7 +555,6 @@ function PhasePanel({ onCPGrant }) {
                             fontSize:10, cursor:"pointer", fontFamily:"inherit",
                             textAlign:"left", fontWeight:isAs?"bold":"normal" }}>
                           {isDoneS?"✓ ":""}{st.name}
-                          {st.cpGrant&&<span style={{ marginLeft:6, fontSize:9, color:"#4CAF50" }}>＋1CP</span>}
                         </button>
                       );
                     })}
@@ -574,7 +570,6 @@ function PhasePanel({ onCPGrant }) {
           <div style={{ background:"#0A0A0C", border:`1px solid ${phColor}44`, borderLeft:`3px solid ${phColor}`, borderRadius:4, padding:12, marginBottom:10 }}>
             <div style={{ fontSize:12, fontWeight:"bold", color:phColor, marginBottom:8, letterSpacing:1 }}>
               {step.name}
-              {step.cpGrant && <span style={{ marginLeft:8, fontSize:10, color:"#4CAF50", background:"#1A2A1A", border:"1px solid #2A4A2A", borderRadius:3, padding:"1px 6px" }}>＋1CP 加算済み</span>}
             </div>
             <div style={{ display:"flex", flexDirection:"column", gap:5, textAlign:"left" }}>
               {step.bullets.map((b,bi)=>(
@@ -599,6 +594,7 @@ function PhasePanel({ onCPGrant }) {
         <button style={S.solidBtn(phColor)} onClick={goNext}>
           {isLast ? "─ フェイズ完了 ─" : stepIdx<phase.steps.length-1 ? "次のステップへ →" : "次のフェイズへ →"}
         </button>
+        </>}
       </div>
 
       {tooltip && <TooltipPopup tipKey={tooltip} onClose={()=>setTooltip(null)} />}
@@ -614,7 +610,7 @@ function StratagemsPanel() {
   const [openId,setOpenId]=useState(null);
   return (
     <div style={S.card}>
-      <Collapsible label="基本策略" color="#D4AF37">
+      <Collapsible label="基本策略" color="#D4AF37" fontSize={12}>
         <div style={{ display:"flex", flexDirection:"column", gap:4, marginTop:6 }}>
           {STRATAGEMS.map(s=>(
             <div key={s.id} style={{ background:"#0A0A0C", border:"1px solid #2A2A32", borderRadius:4 }}>
@@ -627,9 +623,9 @@ function StratagemsPanel() {
                 </div>
               </button>
               {openId===s.id&&(
-                <div style={{ padding:"0 10px 10px 10px", display:"flex", flexDirection:"column", gap:5, borderTop:"1px solid #2A2A32" }}>
+                <div style={{ padding:"0 10px 10px 10px", display:"flex", flexDirection:"column", gap:5, borderTop:"1px solid #2A2A32", textAlign:"left" }}>
                   {s.body.map((b,i)=>(
-                    <div key={i} style={{ fontSize:12, color:"#C8C8C8", lineHeight:1.65, marginTop:i===0?8:0 }} dangerouslySetInnerHTML={{ __html:b }} />
+                    <div key={i} style={{ fontSize:12, color:"#C8C8C8", lineHeight:1.65, marginTop:i===0?8:0, textAlign:"left" }} dangerouslySetInnerHTML={{ __html:b }} />
                   ))}
                 </div>
               )}
@@ -648,7 +644,7 @@ function CoreAbilitiesPanel() {
   const [openId,setOpenId]=useState(null);
   return (
     <div style={S.card}>
-      <Collapsible label="コアアビリティ" color="#6A9BD4">
+      <Collapsible label="コアアビリティ" color="#D4AF37" fontSize={12}>
         <div style={{ display:"flex", flexDirection:"column", gap:4, marginTop:6 }}>
           {CORE_ABILITIES.map(a=>(
             <div key={a.id} style={{ background:"#0A0A0C", border:"1px solid #2A2A32", borderRadius:4 }}>
@@ -658,9 +654,9 @@ function CoreAbilitiesPanel() {
                 <span style={{ fontSize:12, color:"#6A9BD4", flexShrink:0 }}>{openId===a.id?"∧":"∨"}</span>
               </button>
               {openId===a.id&&(
-                <div style={{ padding:"0 10px 10px 10px", display:"flex", flexDirection:"column", gap:5, borderTop:"1px solid #2A2A32" }}>
+                <div style={{ padding:"0 10px 10px 10px", display:"flex", flexDirection:"column", gap:5, borderTop:"1px solid #2A2A32", textAlign:"left" }}>
                   {a.body.map((b,i)=>(
-                    <div key={i} style={{ fontSize:12, color:"#C8C8C8", lineHeight:1.65, marginTop:i===0?8:0 }} dangerouslySetInnerHTML={{ __html:b }} />
+                    <div key={i} style={{ fontSize:12, color:"#C8C8C8", lineHeight:1.65, marginTop:i===0?8:0, textAlign:"left" }} dangerouslySetInnerHTML={{ __html:b }} />
                   ))}
                 </div>
               )}
@@ -1007,13 +1003,42 @@ function GameOverScreen({ players, reason, onReset }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PRIMARY MISSION CARD (shared between both players)
+// ─────────────────────────────────────────────────────────────────────────────
+function PrimaryMissionCard() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ ...S.card, border:"1px solid #D4AF3744", borderTop:"3px solid #D4AF37" }}>
+      <button onClick={()=>setOpen(o=>!o)}
+        style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", background:"transparent", border:"none", cursor:"pointer", padding:"2px 0", fontFamily:"inherit" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <span style={{ fontSize:13, color:"#D4AF37" }}>🎯</span>
+          <span style={{ fontSize:11, fontWeight:"bold", color:"#D4AF37", letterSpacing:2, textTransform:"uppercase" }}>
+            主要目標ミッション
+          </span>
+          <span style={{ fontSize:9, color:"#8B8B8B", letterSpacing:1 }}>（両プレイヤー共通）</span>
+        </div>
+        <span style={{ fontSize:13, color:"#D4AF37", transform:open?"rotate(180deg)":"rotate(0deg)", transition:"transform .2s", lineHeight:1 }}>∧</span>
+      </button>
+      {open&&(
+        <div style={{ marginTop:10, background:"#0A0A0C", border:"1px solid #2A2A3A", borderRadius:4, padding:"10px 12px" }}>
+          <div style={{ fontSize:9, color:"#8B8B8B", letterSpacing:2, textTransform:"uppercase", marginBottom:6 }}>主要目標</div>
+          <div style={{ fontSize:12, color:"#4A4A6A", fontStyle:"italic", textAlign:"center", padding:"8px 0" }}>Coming Soon</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PLAYER CARD
 // ─────────────────────────────────────────────────────────────────────────────
 function PlayerCard({ player, pIdx, isActive, isInRoom, onUpdate, onAddUnit, onDetail, onSurrender }) {
   const color=PLAYER_COLORS[pIdx];
-  const [unitsOpen,setUnitsOpen]=useState(true);
+  const [unitsOpen,setUnitsOpen]=useState(false);
   const [editingName,setEditingName]=useState(false);
   const [nameInput,setNameInput]=useState(player.name);
+  const [secondaryOpen,setSecondaryOpen]=useState(false);
   const aliveCount=player.units.filter(u=>u.currentWounds>0).length;
   const pts=player.units.reduce((s,u)=>s+(parseInt(u.pts)||0),0);
 
@@ -1024,6 +1049,7 @@ function PlayerCard({ player, pIdx, isActive, isInRoom, onUpdate, onAddUnit, onD
 
   return (
     <div style={{ ...S.card, border:`1px solid ${color}${isActive?"99":"33"}`, borderTop:`3px solid ${color}` }}>
+
       {/* Header */}
       <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:10, flexWrap:"nowrap" }}>
         <div style={{ width:7, height:7, background:color, borderRadius:"50%", boxShadow:`0 0 5px ${color}`, flexShrink:0 }} />
@@ -1083,6 +1109,27 @@ function PlayerCard({ player, pIdx, isActive, isInRoom, onUpdate, onAddUnit, onD
                 />
               ))
             }
+          </div>
+        )}
+      </div>
+
+      {/* ── 副次目標 ── */}
+      <div style={{ marginTop:8 }}>
+        <button onClick={()=>setSecondaryOpen(o=>!o)}
+          style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", background:"transparent", border:"none", cursor:"pointer", padding:"4px 0", fontFamily:"inherit" }}>
+          <span style={{ fontSize:10, fontWeight:"bold", color, letterSpacing:2, textTransform:"uppercase" }}>
+            副次目標ミッション
+          </span>
+          <span style={{ fontSize:11, color, transform:secondaryOpen?"rotate(180deg)":"rotate(0deg)", transition:"transform .2s", lineHeight:1 }}>∧</span>
+        </button>
+        {secondaryOpen&&(
+          <div style={{ marginTop:4, display:"flex", flexDirection:"column", gap:4 }}>
+            {[1,2].map(n=>(
+              <div key={n} style={{ background:"#0A0A0C", border:"1px solid #2A2A3A", borderRadius:4, padding:"8px 10px" }}>
+                <div style={{ fontSize:9, color:"#8B8B8B", letterSpacing:2, textTransform:"uppercase", marginBottom:4 }}>副次目標 {n}</div>
+                <div style={{ fontSize:11, color:"#4A4A6A", fontStyle:"italic", textAlign:"center", padding:"6px 0" }}>Coming Soon</div>
+              </div>
+            ))}
           </div>
         )}
       </div>
@@ -1248,17 +1295,29 @@ export default function App() {
     updatePlayer(pIdx,p=>({...p,units:[...p.units,template]}));
   };
 
-  // ── Next turn ──
+  // ── Next turn — also grant +1 CP to both players each turn transition ──
   const nextTurn=()=>{
+    // +1 CP to both players on every turn advance (指揮フェイズCP獲得ルール)
+    const nextPlayers = players.map(p=>({ ...p, cp:p.cp+1 }));
+    setPlayers(nextPlayers);
+
+    let patch;
     if(activePlayer===0){
-      updateGameState({ activePlayer:1 });
+      patch={ activePlayer:1 };
+    } else if(currentTurn>=TOTAL_TURNS){
+      patch={ gameOver:true, gameOverReason:`全${TOTAL_TURNS}ターン完了` };
     } else {
-      if(currentTurn>=TOTAL_TURNS){
-        updateGameState({ gameOver:true, gameOverReason:`全${TOTAL_TURNS}ターン完了` });
-      } else {
-        updateGameState({ currentTurn:currentTurn+1, activePlayer:0 });
-      }
+      patch={ currentTurn:currentTurn+1, activePlayer:0 };
     }
+    const nextTurnVal   = patch.currentTurn   ?? currentTurn;
+    const nextAP        = patch.activePlayer  ?? activePlayer;
+    const nextGO        = patch.gameOver      ?? gameOver;
+    const nextGOR       = patch.gameOverReason?? gameOverReason;
+    if(patch.currentTurn!=null)    setCurrentTurn(nextTurnVal);
+    if(patch.activePlayer!=null)   setActivePlayer(nextAP);
+    if(patch.gameOver!=null)       setGameOver(nextGO);
+    if(patch.gameOverReason!=null) setGameOverReason(nextGOR);
+    pushToFirebase({ players:nextPlayers, currentTurn:nextTurnVal, activePlayer:nextAP, gameOver:nextGO, gameOverReason:nextGOR, updatedAt:new Date().toISOString() });
   };
 
   // ── Surrender ──
@@ -1342,6 +1401,9 @@ export default function App() {
       </div>
 
       <div style={S.main}>
+        {/* ── 主要目標ミッション（共通） ── */}
+        <PrimaryMissionCard />
+
         {/* ── PLAYERS (縦並び) ── */}
         <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
           {players.map((player,pIdx)=>(
@@ -1357,7 +1419,7 @@ export default function App() {
         </div>
 
         {/* ── PHASE PANEL ── */}
-        <PhasePanel onCPGrant={handleCPGrant} />
+        <PhasePanel />
 
         {/* ── STRATAGEMS ── */}
         <StratagemsPanel />
