@@ -10,7 +10,10 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { db } from "./firebase";
+import { auth, db } from "./firebase";
+import {
+  GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged,
+} from "firebase/auth";
 import {
   doc, collection, setDoc, getDoc, onSnapshot,
   addDoc, updateDoc, deleteDoc, query, orderBy
@@ -372,9 +375,11 @@ const blankWeapon  = ()=>({ id:uid(), name:"", type:"射撃", range:"", A:"", sk
 const genRoomId    = ()=>Math.random().toString(36).substring(2,8).toUpperCase();
 
 // Firebase Firestore paths
-const roomRef  = (id)=>doc(db,"battleRooms",id);
-const rosterCol= ()=>collection(db,"roster");
-const rosterRef= (id)=>doc(db,"roster",id);
+const roomRef        = (id)=>doc(db,"battleRooms",id);
+const rosterCol      = ()=>collection(db,"roster");
+const rosterRef      = (id)=>doc(db,"roster",id);
+const missionsCol    = ()=>collection(db,"primaryMissions");
+const currentMission = (roomId)=>doc(db,"battleRooms",roomId,"meta","mission");
 
 // Default battle state written to Firestore
 const defaultBattleState = (names=["プレイヤー1","プレイヤー2"])=>({
@@ -650,8 +655,8 @@ function CoreAbilitiesPanel() {
             <div key={a.id} style={{ background:"#0A0A0C", border:"1px solid #2A2A32", borderRadius:4 }}>
               <button onClick={()=>setOpenId(o=>o===a.id?null:a.id)}
                 style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", background:"transparent", border:"none", cursor:"pointer", padding:"7px 10px", fontFamily:"inherit" }}>
-                <span style={{ fontSize:12, fontWeight:"bold", color:"#6A9BD4", textAlign:"left" }}>{a.name}</span>
-                <span style={{ fontSize:12, color:"#6A9BD4", flexShrink:0 }}>{openId===a.id?"∧":"∨"}</span>
+                <span style={{ fontSize:12, fontWeight:"bold", color:"#E8E8E8", textAlign:"left" }}>{a.name}</span>
+                <span style={{ fontSize:12, color:"#E8E8E8", flexShrink:0 }}>{openId===a.id?"∧":"∨"}</span>
               </button>
               {openId===a.id&&(
                 <div style={{ padding:"0 10px 10px 10px", display:"flex", flexDirection:"column", gap:5, borderTop:"1px solid #2A2A32", textAlign:"left" }}>
@@ -1005,28 +1010,97 @@ function GameOverScreen({ players, reason, onReset }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // PRIMARY MISSION CARD (shared between both players)
 // ─────────────────────────────────────────────────────────────────────────────
-function PrimaryMissionCard() {
-  const [open, setOpen] = useState(false);
+// ─────────────────────────────────────────────────────────────────────────────
+// MISSION DETAIL POPUP
+// ─────────────────────────────────────────────────────────────────────────────
+function MissionDetailPopup({ mission, onClose }) {
+  if(!mission) return null;
   return (
-    <div style={{ ...S.card, border:"1px solid #D4AF3744", borderTop:"3px solid #D4AF37" }}>
-      <button onClick={()=>setOpen(o=>!o)}
-        style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", background:"transparent", border:"none", cursor:"pointer", padding:"2px 0", fontFamily:"inherit" }}>
-        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-          <span style={{ fontSize:13, color:"#D4AF37" }}>🎯</span>
-          <span style={{ fontSize:11, fontWeight:"bold", color:"#D4AF37", letterSpacing:2, textTransform:"uppercase" }}>
-            主要目標ミッション
-          </span>
-          <span style={{ fontSize:9, color:"#8B8B8B", letterSpacing:1 }}>（両プレイヤー共通）</span>
+    <div style={S.overlay} onClick={onClose}>
+      <div style={{ ...S.modal, maxWidth:500, border:"1px solid #D4AF37" }} onClick={e=>e.stopPropagation()}>
+        {/* Header */}
+        <div style={{ borderBottom:"2px solid #D4AF37", paddingBottom:12, marginBottom:16 }}>
+          <div style={{ fontSize:10, color:"#D4AF37", letterSpacing:3, textTransform:"uppercase", marginBottom:4 }}>主要目標</div>
+          <div style={{ fontSize:20, fontWeight:"bold", color:"#E8E8E8", letterSpacing:1 }}>{mission.name}</div>
         </div>
-        <span style={{ fontSize:13, color:"#D4AF37", transform:open?"rotate(180deg)":"rotate(0deg)", transition:"transform .2s", lineHeight:1 }}>∧</span>
-      </button>
-      {open&&(
-        <div style={{ marginTop:10, background:"#0A0A0C", border:"1px solid #2A2A3A", borderRadius:4, padding:"10px 12px" }}>
-          <div style={{ fontSize:9, color:"#8B8B8B", letterSpacing:2, textTransform:"uppercase", marginBottom:6 }}>主要目標</div>
-          <div style={{ fontSize:12, color:"#4A4A6A", fontStyle:"italic", textAlign:"center", padding:"8px 0" }}>Coming Soon</div>
+
+        {/* Sections */}
+        {(mission.sections||[]).map((sec,i)=>(
+          <div key={i} style={{ marginBottom:14 }}>
+            {sec.heading&&(
+              <div style={{ background:"#2A2A32", borderRadius:3, padding:"5px 10px", fontSize:12, fontWeight:"bold", color:"#E8E8E8", marginBottom:8 }}>
+                {sec.heading}
+              </div>
+            )}
+            {(sec.rows||[]).map((row,j)=>(
+              <div key={j} style={{ fontSize:12, color:"#C8C8C8", lineHeight:1.75, marginBottom:4, paddingLeft:sec.heading?4:0, borderBottom:"1px dotted #2A2A3A", paddingBottom:4, textAlign:"left" }}>
+                {row.label&&<span style={{ fontWeight:"bold", color:"#E8E8E8" }}>{row.label}：</span>}
+                <span dangerouslySetInnerHTML={{ __html:row.text }} />
+              </div>
+            ))}
+          </div>
+        ))}
+
+        <div style={{ textAlign:"right", marginTop:8 }}>
+          <button style={S.solidBtn("#D4AF37")} onClick={onClose}>閉じる</button>
         </div>
-      )}
+      </div>
     </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRIMARY MISSION CARD
+// ─────────────────────────────────────────────────────────────────────────────
+function PrimaryMissionCard({ roomId, mission, onReroll }) {
+  const [panelOpen,  setPanelOpen]  = useState(true);
+  const [detailOpen, setDetailOpen] = useState(false);
+
+  return (
+    <>
+      <div style={{ ...S.card, border:"1px solid #D4AF3744", borderTop:"3px solid #D4AF37" }}>
+        {/* Panel header */}
+        <button onClick={()=>setPanelOpen(o=>!o)}
+          style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center", background:"transparent", border:"none", cursor:"pointer", padding:"2px 0", marginBottom:panelOpen?10:0, fontFamily:"inherit" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+            <span style={{ fontSize:13, color:"#D4AF37" }}>🎯</span>
+            <span style={{ fontSize:12, fontWeight:"bold", color:"#D4AF37", letterSpacing:2, textTransform:"uppercase" }}>主要目標ミッション</span>
+            <span style={{ fontSize:9, color:"#8B8B8B", letterSpacing:1 }}>（両プレイヤー共通）</span>
+          </div>
+          <span style={{ fontSize:13, color:"#D4AF37", transform:panelOpen?"rotate(180deg)":"rotate(0deg)", transition:"transform .2s", lineHeight:1 }}>∧</span>
+        </button>
+
+        {panelOpen&&(
+          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+            {/* Mission name button → open detail */}
+            {mission ? (
+              <button onClick={()=>setDetailOpen(true)}
+                style={{ flex:1, background:"#0A0A0C", border:"1px solid #D4AF3766", borderRadius:4, padding:"10px 14px", textAlign:"left", cursor:"pointer", fontFamily:"inherit", display:"flex", alignItems:"center", gap:10 }}>
+                <span style={{ fontSize:15, fontWeight:"bold", color:"#E8E8E8", letterSpacing:1 }}>{mission.name}</span>
+                <span style={{ fontSize:10, color:"#D4AF37", marginLeft:"auto", whiteSpace:"nowrap" }}>詳細を見る →</span>
+              </button>
+            ) : (
+              <div style={{ flex:1, background:"#0A0A0C", border:"1px dashed #2A2A3A", borderRadius:4, padding:"10px 14px" }}>
+                <span style={{ fontSize:12, color:"#4A4A6A", fontStyle:"italic" }}>
+                  {roomId ? "ミッションを抽選してください" : "ルームを作成するとランダムに決定されます"}
+                </span>
+              </div>
+            )}
+            {/* Reroll button */}
+            {roomId&&(
+              <button onClick={onReroll} title="ランダム抽選"
+                style={{ ...S.outlineBtn("#D4AF37"), padding:"9px 12px", fontSize:13, flexShrink:0 }}>
+                🎲
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {detailOpen&&mission&&(
+        <MissionDetailPopup mission={mission} onClose={()=>setDetailOpen(false)} />
+      )}
+    </>
   );
 }
 
@@ -1136,7 +1210,7 @@ function PlayerCard({ player, pIdx, isActive, isInRoom, onUpdate, onAddUnit, onD
 
       {/* Surrender */}
       <div style={{ marginTop:8, textAlign:"right" }}>
-        <button style={{ ...S.outlineBtn("#C0392B"), fontSize:10, padding:"3px 8px" }} onClick={onSurrender}>🏳 投了</button>
+        <button style={{ ...S.outlineBtn(color), fontSize:10, padding:"3px 8px" }} onClick={onSurrender}>🏳 投了</button>
       </div>
     </div>
   );
@@ -1146,6 +1220,9 @@ function PlayerCard({ player, pIdx, isActive, isInRoom, onUpdate, onAddUnit, onD
 // MAIN APP
 // ─────────────────────────────────────────────────────────────────────────────
 export default function App() {
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [isAllowed, setIsAllowed] = useState(false);
   // ── Battle state (synced via Firebase when in a room) ──
   const [players, setPlayers]             = useState([
     { name:"プレイヤー1", cp:0, vp:0, units:[] },
@@ -1164,8 +1241,12 @@ export default function App() {
   const ignoreNextSnapshot = useRef(false); // prevent echo writes
 
   // ── Firebase roster ──
-  const [roster, setRoster]     = useState([]);
+  const [roster, setRoster]           = useState([]);
   const [rosterLoaded, setRosterLoaded] = useState(false);
+
+  // ── Primary mission ──
+  const [missionList, setMissionList] = useState([]);   // all missions from Firestore
+  const [mission,     setMission]     = useState(null); // currently selected mission
 
   // ── UI modals ──
   const [addingUnit,       setAddingUnit]       = useState(null);
@@ -1173,6 +1254,46 @@ export default function App() {
   const [viewingUnit,      setViewingUnit]       = useState(null);
   const [showRoster,       setShowRoster]        = useState(false);
   const [confirmSurrender, setConfirmSurrender]  = useState(null);
+  const [confirmLogout,    setConfirmLogout]      = useState(false);
+
+  const login = async () => {
+  const provider = new GoogleAuthProvider();
+  await signInWithPopup(auth, provider);
+  };
+  const logout = async () => {
+    setMission(null);
+    await signOut(auth);
+  };
+
+  useEffect(() => {
+  const unsub = onAuthStateChanged(auth, async (u) => {
+
+    if (!u) {
+      setUser(null);
+      setIsAllowed(false);
+      setAuthLoading(false);
+      return;
+    }
+
+    setUser(u);
+
+    try {
+      const snap = await getDoc(
+        doc(db, "allowedUsers", u.email)
+      );
+
+      setIsAllowed(snap.exists());
+
+    } catch (err) {
+      console.error(err);
+      setIsAllowed(false);
+    }
+
+    setAuthLoading(false);
+  });
+
+  return unsub;
+  }, []);
 
   // ── Load roster from Firestore on mount ──
   useEffect(()=>{
@@ -1184,6 +1305,32 @@ export default function App() {
     });
     return unsub;
   },[]);
+
+  // ── Load primary missions list from Firestore ──
+  useEffect(()=>{
+    const q=query(missionsCol(), orderBy("order","asc"));
+    const unsub=onSnapshot(q,(snap)=>{
+      setMissionList(snap.docs.map(d=>({ id:d.id, ...d.data() })));
+    });
+    return unsub;
+  },[]);
+
+  // ── Subscribe to room's selected mission ──
+  useEffect(()=>{
+    if(!roomId) return;
+    const unsub=onSnapshot(currentMission(roomId),(snap)=>{
+      if(snap.exists()) setMission(snap.data());
+      else setMission(null);
+    });
+    return unsub;
+  },[roomId]);
+
+  // ── Pick a random mission and save to room ──
+  const rerollMission=async()=>{
+    if(!roomId||missionList.length===0) return;
+    const picked=missionList[Math.floor(Math.random()*missionList.length)];
+    await setDoc(currentMission(roomId), picked);
+  };
 
   // ── Save roster unit to Firestore ──
   const saveTemplate=async(unit)=>{
@@ -1230,13 +1377,17 @@ export default function App() {
     return unsub;
   },[roomId]);
 
-  // ── Create room ──
+  // ── Create room (also auto-picks a random mission) ──
   const createRoom=async()=>{
     const id=genRoomId();
     const state={ ...defaultBattleState([players[0].name,players[1].name]), createdAt:new Date().toISOString() };
     await setDoc(roomRef(id), state);
+    // auto-pick random mission
+    if(missionList.length>0){
+      const picked=missionList[Math.floor(Math.random()*missionList.length)];
+      await setDoc(currentMission(id), picked);
+    }
     setRoomId(id);
-    // reset local state to match
     setPlayers(state.players);
     setCurrentTurn(state.currentTurn);
     setActivePlayer(state.activePlayer);
@@ -1336,6 +1487,89 @@ export default function App() {
 
   const activePColor=PLAYER_COLORS[activePlayer];
 
+  if (authLoading) {
+  return (
+    <div style={{ minHeight:"100vh", background:"#0A0A0C", display:"flex", justifyContent:"center", alignItems:"center", fontFamily:"'Courier New','Courier',monospace" }}>
+      <div style={{ textAlign:"center" }}>
+        <div style={{ fontSize:13, fontWeight:"bold", color:"#D4AF37", letterSpacing:3, textTransform:"uppercase", textShadow:"0 0 20px rgba(212,175,55,.4)", marginBottom:16 }}>⚙ WH40K Battle Manager</div>
+        <div style={{ fontSize:11, color:"#8B8B8B", letterSpacing:3, textTransform:"uppercase" }}>認証確認中...</div>
+      </div>
+    </div>
+  );
+  }
+
+  if (!user) {
+  return (
+    <div style={{ minHeight:"100vh", background:"#0A0A0C", backgroundImage:"radial-gradient(ellipse at 50% 40%,rgba(212,175,55,.06) 0%,transparent 65%)", display:"flex", justifyContent:"center", alignItems:"center", padding:24, fontFamily:"'Courier New','Courier',monospace" }}>
+      <div style={{ width:"100%", maxWidth:400, display:"flex", flexDirection:"column", alignItems:"center", gap:0 }}>
+
+        {/* Emblem */}
+        <div style={{ fontSize:40, marginBottom:16, filter:"drop-shadow(0 0 12px rgba(212,175,55,.5))" }}>⚙</div>
+
+        {/* Title */}
+        <div style={{ fontSize:18, fontWeight:"bold", color:"#D4AF37", letterSpacing:4, textTransform:"uppercase", textShadow:"0 0 20px rgba(212,175,55,.4)", textAlign:"center", marginBottom:4 }}>
+          WH40K Battle Manager
+        </div>
+        <div style={{ fontSize:9, color:"#8B8B8B", letterSpacing:4, textTransform:"uppercase", marginBottom:32 }}>
+          β版 対戦管理ツール（11版）
+        </div>
+
+        {/* Divider */}
+        <div style={{ height:1, background:"linear-gradient(90deg,transparent,#D4AF37,transparent)", width:"100%", marginBottom:28 }} />
+
+        {/* Notice */}
+        <div style={{ background:"#1A1A1F", border:"1px solid #D4AF3744", borderLeft:"3px solid #D4AF37", borderRadius:4, padding:"12px 16px", marginBottom:28, width:"100%", boxSizing:"border-box" }}>
+          <div style={{ fontSize:10, color:"#D4AF37", letterSpacing:2, textTransform:"uppercase", marginBottom:6 }}>⚠ アクセス制限</div>
+          <div style={{ fontSize:12, color:"#C8C8C8", lineHeight:1.7 }}>
+            このサービスは招待されたユーザー専用です。<br />
+            Googleアカウントでログイン後、管理者によってアクセスが許可されたユーザーのみご利用いただけます。
+          </div>
+        </div>
+
+        {/* Login button */}
+        <button onClick={login}
+          style={{ width:"100%", padding:"12px 0", background:"transparent", border:"1px solid #D4AF37", borderRadius:4, color:"#D4AF37", fontSize:13, fontWeight:"bold", fontFamily:"'Courier New','Courier',monospace", letterSpacing:2, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:10, transition:"background .15s" }}
+          onMouseOver={e=>e.currentTarget.style.background="rgba(212,175,55,.1)"}
+          onMouseOut={e=>e.currentTarget.style.background="transparent"}>
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z" fill="#4285F4"/>
+            <path d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z" fill="#34A853"/>
+            <path d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" fill="#FBBC05"/>
+            <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z" fill="#EA4335"/>
+          </svg>
+          Googleでログイン
+        </button>
+
+        {/* Divider */}
+        <div style={{ height:1, background:"linear-gradient(90deg,transparent,#2A2A32,transparent)", width:"100%", marginTop:28 }} />
+      </div>
+    </div>
+  );
+  }
+
+  if (!isAllowed) {
+  return (
+    <div style={{ minHeight:"100vh", background:"#0A0A0C", display:"flex", justifyContent:"center", alignItems:"center", padding:24, fontFamily:"'Courier New','Courier',monospace" }}>
+      <div style={{ width:"100%", maxWidth:400, display:"flex", flexDirection:"column", alignItems:"center", gap:0 }}>
+        <div style={{ fontSize:32, marginBottom:16 }}>🚫</div>
+        <div style={{ fontSize:15, fontWeight:"bold", color:"#C0392B", letterSpacing:3, textTransform:"uppercase", marginBottom:24 }}>アクセス拒否</div>
+        <div style={{ background:"#1A1A1F", border:"1px solid #C0392B44", borderLeft:"3px solid #C0392B", borderRadius:4, padding:"12px 16px", marginBottom:24, width:"100%", boxSizing:"border-box" }}>
+          <div style={{ fontSize:12, color:"#C8C8C8", lineHeight:1.7 }}>
+            <strong style={{ color:"#E8E8E8" }}>{user.email}</strong> はこのサービスへのアクセスが許可されていません。<br />
+            招待を受けている場合は管理者にご連絡ください。
+          </div>
+        </div>
+        <button onClick={logout}
+          style={{ padding:"9px 24px", background:"transparent", border:"1px solid #8B8B8B", borderRadius:4, color:"#8B8B8B", fontSize:12, fontFamily:"'Courier New','Courier',monospace", letterSpacing:2, cursor:"pointer" }}
+          onMouseOver={e=>e.currentTarget.style.borderColor="#E8E8E8"}
+          onMouseOut={e=>e.currentTarget.style.borderColor="#8B8B8B"}>
+          ログアウト
+        </button>
+      </div>
+    </div>
+  );
+  }
+
   return (
     <div style={S.app}>
       {/* ── HEADER ── */}
@@ -1352,6 +1586,16 @@ export default function App() {
               {players[activePlayer].name}
             </div>
             <div style={{ fontSize:18, fontWeight:"bold", color:"#D4AF37", lineHeight:1.2 }}>T{currentTurn}/{TOTAL_TURNS}</div>
+          </div>
+          {/* User badge */}
+          <div style={{ display:"flex", alignItems:"center", gap:5, background:"#1A1A1F", border:"1px solid #2A2A32", borderRadius:4, padding:"4px 8px", flexShrink:0, maxWidth:120 }}>
+            {user.photoURL&&<img src={user.photoURL} alt="" style={{ width:18, height:18, borderRadius:"50%", flexShrink:0 }} />}
+            <div style={{ minWidth:0 }}>
+              <div style={{ fontSize:9, color:"#8B8B8B", letterSpacing:1, textTransform:"uppercase", lineHeight:1 }}>USER</div>
+              <div style={{ fontSize:10, color:"#C8C8C8", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:80 }}>{user.displayName||user.email}</div>
+            </div>
+            <button onClick={()=>setConfirmLogout(true)} title="ログアウト"
+              style={{ background:"transparent", border:"none", cursor:"pointer", color:"#8B8B8B", fontSize:10, padding:"0 2px", flexShrink:0, lineHeight:1 }}>⏻</button>
           </div>
         </div>
       </div>
@@ -1385,7 +1629,7 @@ export default function App() {
         {!roomId?(
           <button style={{ ...S.solidBtn("#6A5ACD"), fontSize:11, padding:"5px 12px" }} onClick={createRoom}>ルーム作成</button>
         ):(
-          <button style={{ ...S.outlineBtn("#8B8B8B"), fontSize:11 }} onClick={()=>setRoomId("")}>退出</button>
+          <button style={{ ...S.outlineBtn("#8B8B8B"), fontSize:11 }} onClick={()=>{ setRoomId(""); setMission(null); }}>退出</button>
         )}
 
         {/* Turn nav */}
@@ -1402,7 +1646,7 @@ export default function App() {
 
       <div style={S.main}>
         {/* ── 主要目標ミッション（共通） ── */}
-        <PrimaryMissionCard />
+        <PrimaryMissionCard roomId={roomId} mission={mission} onReroll={rerollMission} />
 
         {/* ── PLAYERS (縦並び) ── */}
         <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
@@ -1477,6 +1721,23 @@ export default function App() {
             <div style={{ display:"flex", gap:8, justifyContent:"flex-end" }}>
               <button style={S.outlineBtn("#8B8B8B")} onClick={()=>setConfirmSurrender(null)}>キャンセル</button>
               <button style={S.dangerBtn} onClick={()=>handleSurrender(confirmSurrender)}>投了する</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── LOGOUT CONFIRM ── */}
+      {confirmLogout&&(
+        <div style={S.overlay} onClick={()=>setConfirmLogout(false)}>
+          <div style={{ ...S.modal, maxWidth:340 }} onClick={e=>e.stopPropagation()}>
+            <div style={{ fontSize:14, fontWeight:"bold", color:"#D4AF37", marginBottom:12 }}>⏻ ログアウト確認</div>
+            <div style={{ fontSize:13, color:"#C8C8C8", marginBottom:24, lineHeight:1.7 }}>
+              <strong style={{ color:"#E8E8E8" }}>{user.displayName||user.email}</strong><br />
+              ログアウトしますか？
+            </div>
+            <div style={{ display:"flex", gap:8, justifyContent:"flex-end" }}>
+              <button style={S.outlineBtn("#8B8B8B")} onClick={()=>setConfirmLogout(false)}>キャンセル</button>
+              <button style={S.solidBtn("#D4AF37")} onClick={()=>{ setConfirmLogout(false); logout(); }}>ログアウト</button>
             </div>
           </div>
         </div>
